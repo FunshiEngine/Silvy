@@ -19,6 +19,7 @@
 // Transporte del binario: parsea argv, elige la fuente de la solicitud (stdin
 // o archivo), delega el parseo/despacho en el núcleo y escribe la respuesta a
 // stdout con su código de salida. Ninguna lógica de comandos vive aquí.
+#include "Config/ConfigLlm.h"
 #include "Config/ConfigSilvy.h"
 #include "Errores/RegistroErrores.h"
 #include "Nucleo/DependenciasNucleo.h"
@@ -172,6 +173,19 @@ int main(int argc, char* argv[]) {
     if (usoInvalido) {
         const silvy::ResultadoComando resultado =
             silvy::reportarErrorDeTransporte(errorArgumentos, dependencias);
+        imprimir(resultado);
+        return resultado.codigoSalida;
+    }
+
+    // La configuración de la casa se lee antes de despachar: si es
+    // inválida, el proceso no arranca con un LLM mal configurado (fail-fast)
+    // y el error queda persistido como cualquier otro.
+    try {
+        dependencias.configLlm = silvy::cargarConfigLlm(casa);
+    } catch (const std::exception& error) {
+        const silvy::ResultadoComando resultado =
+            silvy::reportarErrorDeConfiguracion(silvy::envolver(error),
+                                                dependencias);
         imprimir(resultado);
         return resultado.codigoSalida;
     }

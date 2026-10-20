@@ -51,5 +51,13 @@ const std::vector<PeticionLlm>& GatewayFalso::peticiones() const {
     return peticiones_;
 }
 
+void GatewayFalso::cancelar() {
+    cancelado_->store(true);
+}
+
+bool GatewayFalso::cancelado() const {
+    return cancelado_->load();
+}
+
 }  // namespace pruebas
 }  // namespace silvy

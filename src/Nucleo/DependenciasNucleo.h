@@ -19,21 +19,36 @@
 #ifndef SILVY_NUCLEO_DEPENDENCIAS_NUCLEO_H
 #define SILVY_NUCLEO_DEPENDENCIAS_NUCLEO_H
 
+#include "Config/ConfigLlm.h"
 #include "Errores/RegistroErrores.h"
 #include "Llm/LlmGateway.h"
 
 #include <filesystem>
+#include <utility>
 
 namespace silvy {
 
-// Recursos inyectados en el núcleo. El gateway puede faltar: el producto que
-// todavía no tiene modo LLM responde NO_CONFIGURADO. El registro siempre
-// existe, de modo que todo error devuelto quedó persistido.
+// Recursos inyectados en el núcleo. El gateway puede faltar: en ese caso el
+// núcleo construye el que corresponde a la configuración efectiva. El
+// registro siempre existe, de modo que todo error devuelto quedó persistido.
 struct DependenciasNucleo final {
     LlmGateway* gateway;
     RegistroErrores& registro;
     std::filesystem::path casa;
     std::filesystem::path directorioBinario;
+    // Configuración del LLM de la casa (config.json), sin el override del
+    // request: esa se aplica al resolver cada paso.
+    ConfigLlm configLlm;
+
+    DependenciasNucleo(LlmGateway* gateway, RegistroErrores& registro,
+                       std::filesystem::path casa,
+                       std::filesystem::path directorioBinario,
+                       ConfigLlm configLlm = {})
+        : gateway(gateway),
+          registro(registro),
+          casa(std::move(casa)),
+          directorioBinario(std::move(directorioBinario)),
+          configLlm(std::move(configLlm)) {}
 };
 
 }  // namespace silvy

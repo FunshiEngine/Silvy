@@ -22,6 +22,8 @@
 #include "Errores/Errores.h"
 #include "Llm/LlmGateway.h"
 
+#include <atomic>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -39,6 +41,12 @@ public:
 
     RespuestaLlm paso(const PeticionLlm& peticion) override;
 
+    // El gateway falso es instantáneo: solo registra que se pidió cancelar.
+    void cancelar() override;
+
+    // true si se pidió cancelar.
+    bool cancelado() const;
+
     // Peticiones recibidas, en orden.
     const std::vector<PeticionLlm>& peticiones() const;
 
@@ -46,6 +54,10 @@ private:
     std::vector<RespuestaLlm> guion_;
     std::vector<PeticionLlm> peticiones_;
     std::optional<ErrorSilvy> error_;
+    // Compartirlo por puntero mantiene al gateway copiable, que es lo que
+    // necesitan las pruebas que lo construyen y devuelven por valor.
+    std::shared_ptr<std::atomic<bool>> cancelado_ =
+        std::make_shared<std::atomic<bool>>(false);
 };
 
 }  // namespace pruebas

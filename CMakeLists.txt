@@ -19,6 +19,18 @@ FetchContent_Declare(nlohmann_json
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+# cpp-httplib (cliente HTTP contra la API del LLM y servidor de pruebas):
+# header-only, por FetchContent con tag fijo. Igual que nlohmann, SOURCE_SUBDIR
+# apunta a una carpeta que no existe para no ejecutar el CMake de la
+# dependencia.
+FetchContent_Declare(cpp_httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG v0.62.0
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR sin-cmake
+)
+FetchContent_MakeAvailable(cpp_httplib)
+
 add_library(silvy_core STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Comandos/ErroresComandos.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Comandos/PasoAgente.cpp
@@ -28,7 +40,10 @@ add_library(silvy_core STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Errores/Errores.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Errores/ErroresHttp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Errores/RegistroErrores.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Llm/FabricaGateway.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Llm/GatewayOpenAi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Llm/PeticionLlm.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Llm/ProtocoloOpenAi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/CatalogoComandos.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/NucleoSilvy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/Protocolo.cpp
@@ -41,13 +56,33 @@ target_include_directories(silvy_core PUBLIC
 )
 target_include_directories(silvy_core SYSTEM PUBLIC
     ${nlohmann_json_SOURCE_DIR}/include
+    ${cpp_httplib_SOURCE_DIR}
 )
 target_compile_options(silvy_core PRIVATE -Wall -Wextra)
+
+# HTTPS contra proveedores remotos: si hay OpenSSL, se habilita el soporte
+# TLS de cpp-httplib; si no, el cliente funciona solo con http://.
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND)
+    target_compile_definitions(silvy_core PUBLIC CPPHTTPLIB_OPENSSL_SUPPORT)
+    target_link_libraries(silvy_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+    message(STATUS "Silvy: TLS habilitado con OpenSSL ${OPENSSL_VERSION}")
+else()
+    message(WARNING "Silvy: sin OpenSSL, el cliente HTTP solo habla http://")
+endif()
+if(WIN32)
+    # Winsock y CryptoAPI los necesita cpp-httplib en Windows.
+    target_link_libraries(silvy_core PUBLIC ws2_32 crypt32)
+    # cpp-httplib exige Windows 10 o posterior; los encabezados de MinGW
+    # Asumen Windows 7 por omisión.
+    target_compile_definitions(silvy_core PUBLIC _WIN32_WINNT=0x0A00)
+endif()
 
 enable_testing()
 
 add_executable(silvy-tests
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/GatewayFalso.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/ServidorFalso.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/SilvyTests.cpp
 )
 target_link_libraries(silvy-tests PRIVATE silvy_core)

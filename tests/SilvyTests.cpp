@@ -27,13 +27,17 @@
 #include "Errores/ErroresHttp.h"
 #include "Errores/RegistroErrores.h"
 #include "GatewayFalso.h"
+#include "Llm/FabricaGateway.h"
+#include "Llm/GatewayOpenAi.h"
 #include "Llm/PeticionLlm.h"
+#include "Llm/ProtocoloOpenAi.h"
 #include "Nucleo/CatalogoComandos.h"
 #include "Nucleo/DependenciasNucleo.h"
 #include "Nucleo/NucleoSilvy.h"
 #include "Nucleo/Protocolo.h"
 #include "Nucleo/Respuesta.h"
 #include "Nucleo/Solicitud.h"
+#include "ServidorFalso.h"
 
 #include <nlohmann/json.hpp>
 
@@ -42,12 +46,14 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifndef _WIN32
@@ -214,6 +220,8 @@ public:
     silvy::RespuestaLlm paso(const silvy::PeticionLlm&) override {
         throw std::runtime_error("socket roto");
     }
+
+    void cancelar() override {}
 };
 
 void probarErrores() {
@@ -892,6 +900,472 @@ void probarErroresHttp() {
           "el mensaje nombra al servidor local");
 }
 
+// Configuración remota de prueba contra el servidor falso.
+silvy::ConfigLlm configRemota(const std::string& baseUrl) {
+    silvy::ConfigLlm config;
+    config.modo = silvy::ModoLlm::REMOTE;
+    config.baseUrl = baseUrl;
+    config.apiKey = "clave-de-prueba";
+    config.modelName = "phi-4";
+    config.timeoutTotalMs = 4000;
+    config.timeoutConexionMs = 2000;
+    config.maxReintentos = 2;
+    config.esperaBaseMs = 5;
+    return config;
+}
+
+silvy::PeticionLlm peticionDePrueba() {
+    silvy::PeticionLlm peticion;
+    silvy::Mensaje sistema;
+    sistema.rol = silvy::RolMensaje::SISTEMA;
+    sistema.contenido = "sos un agente";
+    peticion.mensajes.push_back(sistema);
+    silvy::Mensaje usuario;
+    usuario.rol = silvy::RolMensaje::USUARIO;
+    usuario.contenido = "hola";
+    peticion.mensajes.push_back(usuario);
+    return peticion;
+}
+
+void probarProtocoloOpenAi() {
+    const auto destino = silvy::interpretarBaseUrl("https://api.example.com/v1");
+    CHECK(destino.esquema == "https", "el esquema se separa");
+    CHECK(destino.host == "api.example.com", "el host se separa");
+    CHECK(destino.puerto == 443, "https usa el puerto 443 por defecto");
+    CHECK(destino.prefijo == "/v1", "el prefijo de ruta se separa");
+
+    const auto local = silvy::interpretarBaseUrl("http://127.0.0.1:8080");
+    CHECK(local.puerto == 8080, "el puerto explícito se respeta");
+    CHECK(local.prefijo.empty(), "sin prefijo de ruta");
+
+    const auto conBarra = silvy::interpretarBaseUrl("http://localhost:1234/v1/");
+    CHECK(conBarra.prefijo == "/v1", "la barra final se quita");
+
+    CHECK(lanzaConCodigo(
+              [&] { silvy::interpretarBaseUrl("api.example.com/v1"); },
+              silvy::CodigoError::NO_CONFIGURADO),
+          "una baseUrl sin esquema es error de configuración");
+    CHECK(lanzaConCodigo([&] { silvy::interpretarBaseUrl("ftp://x/v1"); },
+                          silvy::CodigoError::NO_CONFIGURADO),
+          "un esquema no soportado es error de configuración");
+    CHECK(lanzaConCodigo([&] { silvy::interpretarBaseUrl("http://x:abc/v1"); },
+                          silvy::CodigoError::NO_CONFIGURADO),
+          "un puerto no numérico es error de configuración");
+
+    // Cuerpo de la petición.
+    silvy::PeticionLlm peticion = peticionDePrueba();
+    silvy::Mensaje asistente;
+    asistente.rol = silvy::RolMensaje::ASISTENTE;
+    asistente.contenido = "voy a crear el script";
+    silvy::LlamadaHerramienta llamada;
+    llamada.id = "call_1";
+    llamada.nombre = "project.src.create";
+    llamada.argumentos = {{"ruta", "a.funshi"}};
+    asistente.llamadas.push_back(llamada);
+    peticion.mensajes.push_back(asistente);
+    silvy::Herramienta herramienta;
+    herramienta.nombre = "project.src.create";
+    herramienta.descripcion = "crea un archivo";
+    herramienta.parametros = {{"type", "object"}};
+    peticion.herramientas.push_back(herramienta);
+
+    silvy::ConfigLlm config;
+    config.modo = silvy::ModoLlm::REMOTE;
+    config.modelName = "phi-4";
+    config.temperatura = 0.3;
+    const auto cuerpo = silvy::armarCuerpoPeticion(peticion, config);
+    CHECK(cuerpo["model"] == "phi-4", "el modelo viaja en el cuerpo");
+    CHECK(cuerpo["stream"] == true, "se pide streaming");
+    CHECK(cuerpo["temperature"] == 0.3, "la temperatura viaja");
+    CHECK(cuerpo["messages"].size() == 3, "los mensajes viajan");
+    CHECK(cuerpo["messages"][0]["role"] == "system", "el system va primero");
+    CHECK(cuerpo["messages"][2]["tool_calls"].size() == 1,
+          "las tool calls del historial viajan");
+    CHECK(cuerpo["messages"][2]["tool_calls"][0]["function"]["name"] ==
+              "project.src.create",
+          "el nombre de la herramienta viaja");
+    CHECK(cuerpo["messages"][2]["tool_calls"][0]["function"]["arguments"] ==
+              R"({"ruta":"a.funshi"})",
+          "los argumentos viajan como texto JSON");
+    CHECK(cuerpo["tools"].size() == 1, "el catálogo de herramientas viaja");
+    CHECK(cuerpo["tools"][0]["type"] == "function",
+          "la herramienta es de tipo function");
+
+    // Acumulador de fragmentos.
+    silvy::AcumuladorSse acumulador;
+    CHECK(silvy::aplicarLineaSse(
+              acumulador, R"json({"choices":[{"delta":{"content":"Hola"}}]})json"),
+          "una línea con datos se aplica");
+    CHECK(silvy::aplicarLineaSse(
+              acumulador,
+              R"json({"choices":[{"delta":{"content":", mundo"}}]})json"),
+          "el segundo fragmento se aplica");
+    CHECK(!silvy::aplicarLineaSse(acumulador, "data: [DONE]"),
+          "el marcador de fin no aporta datos");
+    CHECK(!silvy::aplicarLineaSse(acumulador, ": comentario"),
+          "un comentario no aporta datos");
+    CHECK(!silvy::aplicarLineaSse(acumulador, ""),
+          "una línea vacía no aporta datos");
+    const auto turno = acumulador.turno();
+    CHECK(turno.contenido == "Hola, mundo", "el contenido se concatena");
+    CHECK(turno.razonFin == silvy::RazonFin::DETENCION,
+          "sin finish reason se asume detención");
+
+    // Tool calls fragmentadas: el id y el nombre llegan una vez, los
+    // argumentos en varios trozos.
+    nlohmann::json fragmento;
+    fragmento["choices"] = nlohmann::json::array();
+    nlohmann::json eleccion;
+    eleccion["delta"]["tool_calls"] = nlohmann::json::array();
+    nlohmann::json llamadaJson;
+    llamadaJson["index"] = 0;
+    llamadaJson["id"] = "call_1";
+    llamadaJson["type"] = "function";
+    llamadaJson["function"]["name"] = "project.src.create";
+    llamadaJson["function"]["arguments"] = "{\"ruta\":";
+    eleccion["delta"]["tool_calls"].push_back(llamadaJson);
+    fragmento["choices"].push_back(eleccion);
+
+    silvy::AcumuladorSse conLlamadas;
+    conLlamadas.aplicar(fragmento);
+    nlohmann::json segundo = fragmento;
+    segundo["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] =
+        "\"a.funshi\"}";
+    conLlamadas.aplicar(segundo);
+    nlohmann::json fin;
+    fin["choices"] = nlohmann::json::array();
+    nlohmann::json eleccionFin;
+    eleccionFin["finish_reason"] = "tool_calls";
+    fin["choices"].push_back(eleccionFin);
+    conLlamadas.aplicar(fin);
+
+    const auto turnoHerramienta = conLlamadas.turno();
+    CHECK(turnoHerramienta.llamadas.size() == 1,
+          "las fragmentos de una llamada se fusionan");
+    CHECK(turnoHerramienta.llamadas[0].id == "call_1",
+          "el id de la llamada se conserva");
+    CHECK(turnoHerramienta.llamadas[0].nombre == "project.src.create",
+          "el nombre de la llamada se conserva");
+    CHECK(turnoHerramienta.llamadas[0].argumentos["ruta"] == "a.funshi",
+          "los argumentos se ensamblan");
+    CHECK(turnoHerramienta.razonFin == silvy::RazonFin::LLAMADAS_HERRAMIENTA,
+          "la razón de fin del proveedor se respeta");
+
+    // Argumentos que no son JSON: error tipado, no turno silencioso.
+    silvy::AcumuladorSse roto;
+    nlohmann::json fragmentoRoto;
+    fragmentoRoto["choices"] = nlohmann::json::array();
+    nlohmann::json eleccionRota;
+    eleccionRota["delta"]["tool_calls"] = nlohmann::json::array();
+    nlohmann::json llamadaRota;
+    llamadaRota["index"] = 0;
+    llamadaRota["function"]["name"] = "project.src.create";
+    llamadaRota["function"]["arguments"] = "esto no es json";
+    eleccionRota["delta"]["tool_calls"].push_back(llamadaRota);
+    fragmentoRoto["choices"].push_back(eleccionRota);
+    roto.aplicar(fragmentoRoto);
+    CHECK(lanzaConCodigo([&] { roto.turno(); },
+                          silvy::CodigoError::DESCONOCIDO),
+          "los argumentos inválidos son un error tipado");
+
+    // Respuesta completa (servidor que ignora el streaming).
+    nlohmann::json cuerpoCompleto;
+    cuerpoCompleto["choices"] = nlohmann::json::array();
+    nlohmann::json eleccionCompleta;
+    eleccionCompleta["message"]["content"] = "hola";
+    eleccionCompleta["message"]["tool_calls"] = nlohmann::json::array();
+    nlohmann::json llamadaCompleta;
+    llamadaCompleta["id"] = "call_9";
+    llamadaCompleta["function"]["name"] = "script.compile";
+    llamadaCompleta["function"]["arguments"] = R"({"projectId":"Demo"})";
+    eleccionCompleta["message"]["tool_calls"].push_back(llamadaCompleta);
+    eleccionCompleta["finish_reason"] = "tool_calls";
+    cuerpoCompleto["choices"].push_back(eleccionCompleta);
+
+    const auto turnoCompleto = silvy::turnoDesdeCuerpo(cuerpoCompleto);
+    CHECK(turnoCompleto.contenido == "hola",
+          "el contenido de la respuesta completa");
+    CHECK(turnoCompleto.llamadas.size() == 1,
+          "la llamada de la respuesta completa");
+    CHECK(turnoCompleto.llamadas[0].argumentos["projectId"] == "Demo",
+          "los argumentos de la respuesta completa");
+    CHECK(turnoCompleto.razonFin == silvy::RazonFin::LLAMADAS_HERRAMIENTA,
+          "la razón de fin de la respuesta completa");
+    CHECK(lanzaConCodigo(
+              [&] { silvy::turnoDesdeCuerpo(nlohmann::json::object()); },
+              silvy::CodigoError::DESCONOCIDO),
+          "una respuesta sin choices es un error tipado");
+}
+
+void probarGatewayRemoto() {
+    silvy::pruebas::ServidorFalso servidor;
+    silvy::pruebas::RespuestaFalsa respuesta;
+    respuesta.tipoContenido = "text/event-stream";
+    respuesta.trozos = {
+        R"json(data: {"choices":[{"delta":{"content":"Voy a "}}]})json"
+        "\n\n",
+        R"json(data: {"choices":[{"delta":{"content":"crear el script"}}]})json"
+        "\n\n",
+        R"json(data: {"choices":[{"delta":{},"finish_reason":"stop"}]})json"
+        "\n\n",
+        "data: [DONE]\n\n"};
+    servidor.encolar(respuesta);
+    servidor.arrancar();
+
+    silvy::GatewayOpenAi gateway(configRemota(servidor.baseUrl()));
+    const auto turno = gateway.paso(peticionDePrueba());
+    CHECK(turno.contenido == "Voy a crear el script",
+          "el contenido del stream se arma");
+    CHECK(turno.razonFin == silvy::RazonFin::DETENCION,
+          "la razón de fin sale del proveedor");
+    CHECK(servidor.peticiones().size() == 1,
+          "el servidor recibió una petición");
+    CHECK(servidor.peticiones()[0].ruta == "/v1/chat/completions",
+          "la ruta lleva el prefijo de la base");
+    CHECK(servidor.peticiones()[0].autorizacion == "Bearer clave-de-prueba",
+          "la api key viaja en la cabecera");
+    const auto cuerpo = nlohmann::json::parse(servidor.peticiones()[0].cuerpo);
+    CHECK(cuerpo["model"] == "phi-4", "el modelo viaja al proveedor");
+    CHECK(cuerpo["stream"] == true, "se pide streaming");
+    CHECK(cuerpo["messages"].size() == 2, "el historial viaja completo");
+    servidor.detener();
+
+    // Tool calls reales por SSE.
+    silvy::pruebas::ServidorFalso conHerramientas;
+    silvy::pruebas::RespuestaFalsa conLlamada;
+    conLlamada.tipoContenido = "text/event-stream";
+    conLlamada.trozos = {
+        R"json(data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"project.src.create","arguments":"{\"ruta\":"}}]}}]})json"
+        "\n\n",
+        R"json(data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.funshi\"}"}}]}}]})json"
+        "\n\n",
+        R"json(data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]})json"
+        "\n\n"};
+    conHerramientas.encolar(conLlamada);
+    conHerramientas.arrancar();
+    silvy::GatewayOpenAi gatewayHerramientas(
+        configRemota(conHerramientas.baseUrl()));
+    const auto turnoHerramientas =
+        gatewayHerramientas.paso(peticionDePrueba());
+    CHECK(turnoHerramientas.llamadas.size() == 1, "llega una tool call");
+    CHECK(turnoHerramientas.llamadas[0].id == "call_1",
+          "el id de la tool call llega");
+    CHECK(turnoHerramientas.llamadas[0].nombre == "project.src.create",
+          "el nombre de la tool call llega");
+    CHECK(turnoHerramientas.llamadas[0].argumentos["ruta"] == "a.funshi",
+          "los argumentos de la tool call llegan");
+    CHECK(turnoHerramientas.razonFin == silvy::RazonFin::LLAMADAS_HERRAMIENTA,
+          "la razón de fin con tool calls");
+    conHerramientas.detener();
+
+    // 401: clave inválida, sin reintento.
+    silvy::pruebas::ServidorFalso conClave;
+    silvy::pruebas::RespuestaFalsa clave;
+    clave.estado = 401;
+    clave.cuerpo = R"json({"error":{"message":"invalid api key"}})json";
+    conClave.encolar(clave);
+    conClave.arrancar();
+    silvy::GatewayOpenAi gatewayClave(configRemota(conClave.baseUrl()));
+    bool lanzoClave = false;
+    try {
+        gatewayClave.paso(peticionDePrueba());
+    } catch (const silvy::ErrorSilvy& error) {
+        lanzoClave = true;
+        CHECK(error.codigo() == silvy::CodigoError::CLAVE_INVALIDA,
+              "el 401 es clave inválida");
+        CHECK(!error.reintentable(),
+              "la clave inválida no es reintentable");
+    }
+    CHECK(lanzoClave, "el 401 lanza");
+    CHECK(conClave.peticiones().size() == 1, "el 401 no se reintenta");
+    conClave.detener();
+
+    // 503 dos veces y después 200: el backoff salva el paso.
+    silvy::pruebas::ServidorFalso inestable;
+    silvy::pruebas::RespuestaFalsa caido;
+    caido.estado = 503;
+    caido.cuerpo = R"json({"error":{"message":"loading model"}})json";
+    inestable.encolar(caido);
+    inestable.encolar(caido);
+    silvy::pruebas::RespuestaFalsa estable;
+    estable.tipoContenido = "text/event-stream";
+    estable.trozos = {
+        R"json(data: {"choices":[{"delta":{"content":"listo"}}]})json" "\n\n"};
+    inestable.encolar(estable);
+    inestable.arrancar();
+    silvy::GatewayOpenAi gatewayInestable(configRemota(inestable.baseUrl()));
+    const auto turnoEstable = gatewayInestable.paso(peticionDePrueba());
+    CHECK(turnoEstable.contenido == "listo",
+          "el reintento termina en éxito");
+    CHECK(inestable.peticiones().size() == 3, "hubo dos reintentos");
+    inestable.detener();
+
+    // 503 siempre: error tipado tras agotar los reintentos.
+    silvy::pruebas::ServidorFalso siempreCaido;
+    for (int i = 0; i < 3; ++i) {
+        siempreCaido.encolar(caido);
+    }
+    siempreCaido.arrancar();
+    silvy::GatewayOpenAi gatewayCaido(configRemota(siempreCaido.baseUrl()));
+    bool lanzoCaido = false;
+    try {
+        gatewayCaido.paso(peticionDePrueba());
+    } catch (const silvy::ErrorSilvy& error) {
+        lanzoCaido = true;
+        CHECK(error.codigo() == silvy::CodigoError::SERVIDOR_CAIDO,
+              "el 503 es servidor caído");
+        CHECK(error.reintentable(), "el servidor caído es reintentable");
+    }
+    CHECK(lanzoCaido, "el 503 lanza");
+    CHECK(siempreCaido.peticiones().size() == 3,
+          "se agotan los reintentos");
+    siempreCaido.detener();
+
+    // Puerto cerrado: fallo de transporte, reintentable.
+    silvy::pruebas::ServidorFalso cerrado;
+    cerrado.arrancar();
+    const std::string baseCerrada = cerrado.baseUrl();
+    cerrado.detener();
+    silvy::GatewayOpenAi gatewayCerrado(configRemota(baseCerrada));
+    bool lanzoRed = false;
+    try {
+        gatewayCerrado.paso(peticionDePrueba());
+    } catch (const silvy::ErrorSilvy& error) {
+        lanzoRed = true;
+        CHECK(error.codigo() == silvy::CodigoError::SERVIDOR_CAIDO,
+              "el fallo de red local es servidor caído");
+        CHECK(error.reintentable(), "el fallo de red es reintentable");
+    }
+    CHECK(lanzoRed, "el puerto cerrado lanza");
+
+    // Timeout: el proveedor no responde dentro del presupuesto.
+    silvy::pruebas::ServidorFalso mudo;
+    silvy::pruebas::RespuestaFalsa mudoRespuesta;
+    mudoRespuesta.cuerpo = "{}";
+    mudoRespuesta.esperaAntesDeResponderMs = 900;
+    mudo.encolar(mudoRespuesta);
+    mudo.arrancar();
+    auto configTimeout = configRemota(mudo.baseUrl());
+    configTimeout.timeoutTotalMs = 150;
+    configTimeout.maxReintentos = 0;
+    silvy::GatewayOpenAi gatewayTimeout(configTimeout);
+    bool lanzoTimeout = false;
+    try {
+        gatewayTimeout.paso(peticionDePrueba());
+    } catch (const silvy::ErrorSilvy& error) {
+        lanzoTimeout = true;
+        CHECK(error.codigo() == silvy::CodigoError::TIMEOUT,
+              "el timeout se tipa");
+        CHECK(error.reintentable(), "el timeout es reintentable");
+    }
+    CHECK(lanzoTimeout, "el timeout lanza");
+    mudo.detener();
+
+    // Cancelación: el humano corta el stream en curso.
+    silvy::pruebas::ServidorFalso lento;
+    silvy::pruebas::RespuestaFalsa lenta;
+    lenta.tipoContenido = "text/event-stream";
+    lenta.esperaPorTrozoMs = 80;
+    for (int i = 0; i < 10; ++i) {
+        lenta.trozos.push_back(
+            R"json(data: {"choices":[{"delta":{"content":"a"}}]})json" "\n\n");
+    }
+    lento.encolar(lenta);
+    lento.arrancar();
+    silvy::GatewayOpenAi gatewayLento(configRemota(lento.baseUrl()));
+    std::exception_ptr errorCancelacion;
+    std::thread trabajador([&] {
+        try {
+            gatewayLento.paso(peticionDePrueba());
+        } catch (...) {
+            errorCancelacion = std::current_exception();
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    gatewayLento.cancelar();
+    trabajador.join();
+    CHECK(errorCancelacion != nullptr, "el paso cancelado lanza");
+    if (errorCancelacion) {
+        try {
+            std::rethrow_exception(errorCancelacion);
+        } catch (const silvy::ErrorSilvy& tipado) {
+            CHECK(tipado.codigo() == silvy::CodigoError::CANCELADO,
+                  "la cancelación se tipa");
+            CHECK(!tipado.reintentable(),
+                  "la cancelación no es reintentable");
+        }
+    }
+    CHECK(lento.peticiones().size() == 1, "la cancelación no reintenta");
+    lento.detener();
+}
+
+void probarNucleoConLlmRemoto() {
+    silvy::pruebas::ServidorFalso servidor;
+    silvy::pruebas::RespuestaFalsa respuestaSse;
+    respuestaSse.tipoContenido = "text/event-stream";
+    respuestaSse.trozos = {
+        R"json(data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"project.src.create","arguments":"{\"ruta\":\"a.funshi\"}"}}]}}]})json"
+        "\n\n",
+        R"json(data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]})json"
+        "\n\n"};
+    servidor.encolar(respuestaSse);
+    servidor.arrancar();
+
+    EntornoNucleo entorno("nucleo-remoto");
+    escribirArchivo(entorno.casa / "system_prompt.md", "prompt de casa");
+    silvy::DependenciasNucleo dependencias{nullptr, entorno.registro,
+                                           entorno.casa, entorno.bin};
+
+    const nlohmann::json solicitudRemota = {
+        {"command", "agent.step"},
+        {"messages",
+         nlohmann::json::array({{{"role", "user"}, {"content", "hola"}}})},
+        {"config",
+         {{"mode", "REMOTE"},
+          {"baseUrl", servidor.baseUrl()},
+          {"modelName", "phi-4"}}}};
+
+    const auto resultado =
+        silvy::ejecutarSolicitudJson(solicitudRemota, dependencias);
+    const auto respuesta = resultado.respuesta.aJson();
+    CHECK(resultado.codigoSalida == silvy::codigosSalida::kExito,
+          "el paso con LLM remoto responde exito");
+    CHECK(respuesta["result"]["toolCalls"].size() == 1,
+          "el tool call remoto llega al resultado");
+    CHECK(respuesta["result"]["toolCalls"][0]["name"] ==
+              "project.src.create",
+          "el nombre de la herramienta remota");
+    CHECK(respuesta["result"]["toolCalls"][0]["arguments"]["ruta"] == "a.funshi",
+          "los argumentos de la herramienta remota");
+    CHECK(respuesta["result"]["finishReason"] == "tool_calls",
+          "la razón de fin del turno remoto");
+
+    // El proveedor rechaza la clave: error tipado y persistido.
+    silvy::pruebas::RespuestaFalsa rechazo;
+    rechazo.estado = 401;
+    rechazo.cuerpo = R"json({"error":{"message":"invalid api key"}})json";
+    servidor.encolar(rechazo);
+    const auto fallo =
+        silvy::ejecutarSolicitudJson(solicitudRemota, dependencias);
+    const auto respuestaFallo = fallo.respuesta.aJson();
+    CHECK(fallo.codigoSalida == silvy::codigosSalida::kFalloGeneral,
+          "el rechazo del proveedor sale 1");
+    CHECK(respuestaFallo["error"]["codigo"] == "CLAVE_INVALIDA",
+          "el rechazo del proveedor se tipa");
+
+    entorno.registro.vaciar();
+    const auto lineas = lineasDeErrores(entorno);
+    CHECK(lineas.size() == 1, "el error del proveedor se persiste");
+    if (!lineas.empty()) {
+        const auto guardado = nlohmann::json::parse(lineas.back());
+        CHECK(guardado == respuestaFallo["error"],
+              "la respuesta es exactamente el registro guardado");
+        CHECK(guardado["modo"] == "REMOTE", "el registro guarda el modo");
+        CHECK(guardado["modelo"] == "phi-4", "el registro guarda el modelo");
+    }
+    servidor.detener();
+}
+
 void probarPasoAgente() {
     EntornoNucleo entorno("paso-agente");
     escribirArchivo(entorno.casa / "system_prompt.md", "prompt de casa");
@@ -1377,6 +1851,12 @@ int main(int argc, char** argv) {
     probarConfigLlm();
     std::cout << "== errores http ==\n";
     probarErroresHttp();
+    std::cout << "== protocolo openai ==\n";
+    probarProtocoloOpenAi();
+    std::cout << "== gateway remoto ==\n";
+    probarGatewayRemoto();
+    std::cout << "== nucleo con llm remoto ==\n";
+    probarNucleoConLlmRemoto();
     std::cout << "== paso agente ==\n";
     probarPasoAgente();
     std::cout << "== prompt de casa ==\n";

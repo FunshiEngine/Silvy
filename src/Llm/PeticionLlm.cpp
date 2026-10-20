@@ -23,7 +23,7 @@
 namespace silvy {
 
 PeticionLlm armarPeticionLlm(const Solicitud& solicitud,
-                             std::string promptSistema) {
+                             std::string promptSistema, ConfigLlm config) {
     PeticionLlm peticion;
     peticion.mensajes.reserve(solicitud.mensajes.size() + 1);
 
@@ -35,7 +35,7 @@ PeticionLlm armarPeticionLlm(const Solicitud& solicitud,
     peticion.mensajes.insert(peticion.mensajes.end(), solicitud.mensajes.begin(),
                              solicitud.mensajes.end());
     peticion.herramientas = solicitud.herramientas;
-    peticion.config = solicitud.config;
+    peticion.config = std::move(config);
     return peticion;
 }
 

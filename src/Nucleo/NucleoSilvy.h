@@ -45,6 +45,11 @@ ResultadoComando ejecutarSolicitudTexto(const std::string& texto,
 ResultadoComando reportarErrorDeTransporte(const std::string& mensaje,
                                            DependenciasNucleo& dependencias);
 
+// Error de arranque (configuración de la casa ilegible o inválida): se
+// persiste y responde ok:false con exit 1, como cualquier fallo operativo.
+ResultadoComando reportarErrorDeConfiguracion(const ErrorSilvy& error,
+                                              DependenciasNucleo& dependencias);
+
 // Núcleo tipado para consumidores embebidos (tests incluidos): valida el
 // comando y despacha; los errores del comando se capturan y persisten igual
 // que en el borde JSON.

@@ -20,6 +20,7 @@
 
 #include "Comandos/ErroresComandos.h"
 #include "Comandos/PasoAgente.h"
+#include "Config/ConfigLlm.h"
 #include "Nucleo/CatalogoComandos.h"
 #include "Nucleo/Protocolo.h"
 
@@ -87,6 +88,24 @@ ResultadoComando respuestaDeError(const ErrorSilvy& error,
     return resultado;
 }
 
+// Contexto del error persistido: el request manda (puede pisar la casa) y,
+// si no lo dice, se usa la configuración de la casa.
+std::string modoDeContexto(const std::string& modoDelRequest,
+                           const DependenciasNucleo& dependencias) {
+    if (!modoDelRequest.empty()) {
+        return modoDelRequest;
+    }
+    return textoDeModo(dependencias.configLlm.modo);
+}
+
+std::string modeloDeContexto(const std::string& modeloDelRequest,
+                              const DependenciasNucleo& dependencias) {
+    if (!modeloDelRequest.empty()) {
+        return modeloDelRequest;
+    }
+    return dependencias.configLlm.modelName;
+}
+
 // Error de parseo/validación de una solicitud cruda: conserva el comando y el
 // id que se hayan podido leer para que la respuesta sea accionable.
 ResultadoComando respuestaDeSolicitudInvalida(
@@ -98,8 +117,11 @@ ResultadoComando respuestaDeSolicitudInvalida(
             : nlohmann::json::object();
     return respuestaDeError(error, campoSeguro(solicitud, "command"),
                             idSeguro(solicitud), dependencias,
-                            campoSeguro(configuracion, "mode"),
-                            campoSeguro(configuracion, "modelName"));
+                            modoDeContexto(
+                                campoSeguro(configuracion, "mode"), dependencias),
+                            modeloDeContexto(
+                                campoSeguro(configuracion, "modelName"),
+                                dependencias));
 }
 
 std::string comandosValidos() {
@@ -179,9 +201,20 @@ ResultadoComando ejecutarSolicitud(const Solicitud& solicitud,
         const ErrorSilvy tipado = envolver(error);
         return respuestaDeError(tipado, solicitud.comando, solicitud.id,
                                 dependencias,
-                                campoSeguro(solicitud.config, "mode"),
-                                campoSeguro(solicitud.config, "modelName"));
+                                modoDeContexto(
+                                    campoSeguro(solicitud.config, "mode"),
+                                    dependencias),
+                                modeloDeContexto(
+                                    campoSeguro(solicitud.config, "modelName"),
+                                    dependencias));
     }
+}
+
+ResultadoComando reportarErrorDeConfiguracion(
+    const ErrorSilvy& error, DependenciasNucleo& dependencias) {
+    return respuestaDeError(error, {}, std::nullopt, dependencias,
+                             modoDeContexto({}, dependencias),
+                             modeloDeContexto({}, dependencias));
 }
 
 }  // namespace silvy

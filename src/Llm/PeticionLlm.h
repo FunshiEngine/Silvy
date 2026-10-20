@@ -19,6 +19,7 @@
 #ifndef SILVY_LLM_PETICION_LLM_H
 #define SILVY_LLM_PETICION_LLM_H
 
+#include "Config/ConfigLlm.h"
 #include "Llm/LlmGateway.h"
 #include "Nucleo/Solicitud.h"
 
@@ -29,8 +30,9 @@ namespace silvy {
 // Compone el paso del agente: el prompt de sistema efectivo encabeza la
 // conversación y el historial de la CLI viaja tal cual detrás. Los mensajes
 // system del historial son contexto adicional de la CLI; no reemplazan al
-// prompt de Silvy.
-PeticionLlm armarPeticionLlm(const Solicitud& solicitud, std::string promptSistema);
+// prompt de Silvy. La configuración del LLM llega ya resuelta.
+PeticionLlm armarPeticionLlm(const Solicitud& solicitud,
+                             std::string promptSistema, ConfigLlm config);
 
 }  // namespace silvy
 

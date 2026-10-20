@@ -19,27 +19,40 @@
 #include "Comandos/PasoAgente.h"
 
 #include "Config/ConfigSilvy.h"
+#include "Llm/FabricaGateway.h"
 #include "Llm/PeticionLlm.h"
 
 #include <nlohmann/json.hpp>
 
+#include <memory>
 #include <utility>
 
 namespace silvy {
 
 ResultadoComando ejecutarPasoAgente(const Solicitud& solicitud,
                                     DependenciasNucleo& dependencias) {
-    if (dependencias.gateway == nullptr) {
-        throw ErrorConfig(
-            "No hay gateway LLM configurado: el modo de inferencia no está "
-            "disponible");
+    // La configuración efectiva es la de la casa con el override del request
+    // encima: se resuelve en el núcleo para que el gateway reciba una
+    // configuración ya validable y el error persistido traiga el modo y el
+    // modelo que se usaron.
+    const ConfigLlm config =
+        dependencias.configLlm.conOverride(solicitud.config);
+
+    // El gateway inyectado manda (los tests usan uno falso); si no hay, se
+    // construye el que corresponde a la configuración efectiva.
+    std::unique_ptr<LlmGateway> gatewayPropio;
+    LlmGateway* gateway = dependencias.gateway;
+    if (gateway == nullptr) {
+        gatewayPropio = crearGateway(config);
+        gateway = gatewayPropio.get();
     }
 
     const std::string promptSistema = cargarPromptSistema(
         solicitud.promptSistema, dependencias.casa,
         dependencias.directorioBinario);
-    const PeticionLlm peticion = armarPeticionLlm(solicitud, promptSistema);
-    const RespuestaLlm turno = dependencias.gateway->paso(peticion);
+    const PeticionLlm peticion =
+        armarPeticionLlm(solicitud, promptSistema, config);
+    const RespuestaLlm turno = gateway->paso(peticion);
 
     nlohmann::json resultado;
     resultado["content"] = turno.contenido;

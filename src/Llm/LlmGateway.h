@@ -19,6 +19,7 @@
 #ifndef SILVY_LLM_LLM_GATEWAY_H
 #define SILVY_LLM_LLM_GATEWAY_H
 
+#include "Config/ConfigLlm.h"
 #include "Nucleo/Protocolo.h"
 
 #include <nlohmann/json.hpp>
@@ -35,9 +36,9 @@ struct PeticionLlm final {
     // mensaje; detrás viaja el historial de la CLI tal cual.
     std::vector<Mensaje> mensajes;
     std::vector<Herramienta> herramientas;
-    // Override por request (modo, baseUrl, modelName, ...); lo valida el
-    // gateway que lo consuma.
-    nlohmann::json config = nlohmann::json::object();
+    // Configuración efectiva del LLM: la de la casa con el override del
+    // request encima. El gateway la consume ya resuelta.
+    ConfigLlm config;
 };
 
 // Turno devuelto por el LLM, independiente del transporte y del proveedor.
@@ -56,6 +57,11 @@ public:
     // Ejecuta un paso completo (petición → turno). Los fallos se reportan con
     // ErrorSilvy tipado; el núcleo los captura en su borde.
     virtual RespuestaLlm paso(const PeticionLlm& peticion) = 0;
+
+    // Cancela el paso en curso. Es seguro llamarlo desde otro hilo: el
+    // transporte aborta la transferencia y el paso termina con CANCELADO,
+    // que nunca es reintentable.
+    virtual void cancelar() = 0;
 };
 
 }  // namespace silvy
