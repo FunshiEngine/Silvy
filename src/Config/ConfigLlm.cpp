@@ -34,6 +34,12 @@ constexpr int kTimeoutTotalMaxMs = 3600000;
 constexpr int kTimeoutConexionMaxMs = 600000;
 constexpr int kReintentosMax = 10;
 constexpr int kEsperaBaseMaxMs = 60000;
+constexpr int kContextSizeMin = 128;
+constexpr int kContextSizeMax = 40960;
+constexpr int kCapasGpuMax = 999;
+constexpr int kPuertoMax = 65535;
+constexpr int kPortScanMax = 200;
+constexpr int kTimeoutCargaMaxMs = 3600000;
 
 // Un campo con forma incorrecta es error de solicitud cuando viene del
 // request y error de configuración cuando viene del archivo de la casa.
@@ -130,6 +136,40 @@ ConfigLlm aplicarCampos(const ConfigLlm& base, const nlohmann::json& campos,
         resultado.esperaBaseMs = enteroAcotado(
             campos, "retryBaseMs", esArchivo, 0, kEsperaBaseMaxMs);
     }
+    if (tieneValor(campos, "hfBaseUrl")) {
+        resultado.hfBaseUrl =
+            textoDeCampo(campos, "hfBaseUrl", esArchivo);
+    }
+    if (tieneValor(campos, "hfRepo")) {
+        resultado.hfRepo = textoDeCampo(campos, "hfRepo", esArchivo);
+    }
+    if (tieneValor(campos, "hfFile")) {
+        resultado.hfFile = textoDeCampo(campos, "hfFile", esArchivo);
+    }
+    if (tieneValor(campos, "llamaServerPath")) {
+        resultado.llamaServerPath = textoDeCampo(campos, "llamaServerPath",
+                                                 esArchivo);
+    }
+    if (tieneValor(campos, "contextSize")) {
+        resultado.contextSize = enteroAcotado(
+            campos, "contextSize", esArchivo, kContextSizeMin, kContextSizeMax);
+    }
+    if (tieneValor(campos, "gpuLayers")) {
+        resultado.gpuLayers = enteroAcotado(
+            campos, "gpuLayers", esArchivo, 0, kCapasGpuMax);
+    }
+    if (tieneValor(campos, "serverPort")) {
+        resultado.serverPort = enteroAcotado(
+            campos, "serverPort", esArchivo, 0, kPuertoMax);
+    }
+    if (tieneValor(campos, "portScan")) {
+        resultado.portScan = enteroAcotado(
+            campos, "portScan", esArchivo, 1, kPortScanMax);
+    }
+    if (tieneValor(campos, "loadTimeoutMs")) {
+        resultado.timeoutCargaMs = enteroAcotado(
+            campos, "loadTimeoutMs", esArchivo, 1, kTimeoutCargaMaxMs);
+    }
 
     return resultado;
 }
@@ -176,9 +216,56 @@ void ConfigLlm::validar() const {
     std::vector<std::string> problemas;
 
     switch (modo) {
-        case ModoLlm::LOCAL:
-            // Los requisitos de descarga y servidor local llegan con ese modo.
+        case ModoLlm::LOCAL: {
+            if (hfBaseUrl.empty()) {
+                problemas.push_back(
+                    "hfBaseUrl es obligatorio en modo LOCAL (base de descarga "
+                    "del GGUF)");
+            } else if (!empiezaCon(hfBaseUrl, "http://") &&
+                       !empiezaCon(hfBaseUrl, "https://")) {
+                problemas.push_back(
+                    "hfBaseUrl debe empezar con http:// o https://");
+            }
+            if (hfRepo.empty()) {
+                problemas.push_back(
+                    "hfRepo es obligatorio en modo LOCAL (repositorio de "
+                    "HuggingFace con el GGUF)");
+            }
+            if (hfFile.empty()) {
+                problemas.push_back(
+                    "hfFile es obligatorio en modo LOCAL (archivo GGUF a "
+                    "descargar)");
+            }
+            if (llamaServerPath.empty()) {
+                problemas.push_back(
+                    "llamaServerPath es obligatorio en modo LOCAL (ruta del "
+                    "ejecutable llama-server)");
+            }
+            if (contextSize < kContextSizeMin ||
+                contextSize > kContextSizeMax) {
+                problemas.push_back(
+                    "contextSize debe estar entre " +
+                    std::to_string(kContextSizeMin) + " y " +
+                    std::to_string(kContextSizeMax));
+            }
+            if (gpuLayers < 0 || gpuLayers > kCapasGpuMax) {
+                problemas.push_back("gpuLayers debe estar entre 0 y " +
+                                    std::to_string(kCapasGpuMax));
+            }
+            if (serverPort < 0 || serverPort > kPuertoMax) {
+                problemas.push_back("serverPort debe estar entre 0 y " +
+                                    std::to_string(kPuertoMax));
+            }
+            if (portScan < 1 || portScan > kPortScanMax) {
+                problemas.push_back("portScan debe estar entre 1 y " +
+                                    std::to_string(kPortScanMax));
+            }
+            if (timeoutCargaMs < 1 || timeoutCargaMs > kTimeoutCargaMaxMs) {
+                problemas.push_back("loadTimeoutMs debe estar entre 1 y " +
+                                    std::to_string(kTimeoutCargaMaxMs));
+            }
             break;
+        }
         case ModoLlm::REMOTE: {
             if (baseUrl.empty()) {
                 problemas.push_back(
@@ -258,6 +345,57 @@ ConfigLlm cargarConfigLlm(const std::filesystem::path& casa) {
     } catch (const nlohmann::json::exception& excepcion) {
         throw ErrorConfig("Configuración inválida en " + archivo.string() +
                           ": " + excepcion.what());
+    }
+}
+
+void guardarConfigLlm(const ConfigLlm& config,
+                      const std::filesystem::path& casa) {
+    nlohmann::json campos;
+    campos["mode"] = textoDeModo(config.modo);
+    campos["baseUrl"] = config.baseUrl;
+    campos["apiKey"] = config.apiKey;
+    campos["modelName"] = config.modelName;
+    campos["temperature"] = config.temperatura;
+    campos["timeoutMs"] = config.timeoutTotalMs;
+    campos["connectTimeoutMs"] = config.timeoutConexionMs;
+    campos["maxRetries"] = config.maxReintentos;
+    campos["retryBaseMs"] = config.esperaBaseMs;
+    campos["hfBaseUrl"] = config.hfBaseUrl;
+    campos["hfRepo"] = config.hfRepo;
+    campos["hfFile"] = config.hfFile;
+    campos["llamaServerPath"] = config.llamaServerPath;
+    campos["contextSize"] = config.contextSize;
+    campos["gpuLayers"] = config.gpuLayers;
+    campos["serverPort"] = config.serverPort;
+    campos["portScan"] = config.portScan;
+    campos["loadTimeoutMs"] = config.timeoutCargaMs;
+
+    const std::filesystem::path archivo = casa / "config.json";
+    const std::filesystem::path temporal = casa / "config.json.tmp";
+
+    std::error_code error;
+    std::filesystem::create_directories(casa, error);
+
+    {
+        std::ofstream salida(temporal, std::ios::binary | std::ios::trunc);
+        if (!salida) {
+            throw ErrorConfig("No se pudo escribir la configuración en " +
+                              temporal.string());
+        }
+        salida << campos.dump(2) << "\n";
+        salida.flush();
+        if (!salida) {
+            throw ErrorConfig("No se pudo escribir la configuración en " +
+                              temporal.string());
+        }
+    }
+
+    std::filesystem::rename(temporal, archivo, error);
+    if (error) {
+        std::error_code errorLimpieza;
+        std::filesystem::remove(temporal, errorLimpieza);
+        throw ErrorConfig("No se pudo dejar la configuración en " +
+                          archivo.string() + ": " + error.message());
     }
 }
 

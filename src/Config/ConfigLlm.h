@@ -61,6 +61,29 @@ struct ConfigLlm final {
     // Espera base del backoff exponencial: base, 2·base, 4·base...
     int esperaBaseMs = 300;
 
+    // --- Modo local -------------------------------------------------------
+    // Base de la que se descarga el GGUF. Por defecto es HuggingFace; se
+    // puede cambiar a un espejo propio.
+    std::string hfBaseUrl = "https://huggingface.co";
+    // Repositorio de HuggingFace y archivo GGUF que se descarga. La URL
+    // efectiva se arma con ambos.
+    std::string hfRepo = "unsloth/Phi-4-mini-instruct-GGUF";
+    std::string hfFile = "Phi-4-mini-instruct-Q4_K_M.gguf";
+    // Ruta o nombre del ejecutable `llama-server` (se busca en el PATH si es
+    // solo un nombre).
+    std::string llamaServerPath = "llama-server";
+    // Tamaño de contexto pedido al servidor local.
+    int contextSize = 8192;
+    // Capas de GPU que se delegan al modelo (-ngl); 0 = solo CPU.
+    int gpuLayers = 0;
+    // Puerto del servidor local; 0 = se busca uno libre desde el primer
+    // candidato.
+    int serverPort = 8081;
+    // Cuántos puertos consecutivos se prueban al buscar uno libre.
+    int portScan = 20;
+    // Tiempo máximo de carga del modelo en memoria.
+    int timeoutCargaMs = 180000;
+
     // Config efectiva: aplica los campos de `override` (config del request).
     // Un campo con tipo incorrecto lanza SOLICITUD_INVALIDA.
     ConfigLlm conOverride(const nlohmann::json& override) const;
@@ -73,6 +96,12 @@ struct ConfigLlm final {
 // Carga <casa>/config.json si existe. Sin archivo devuelve los defaults; un
 // JSON malformado o con campos de tipo incorrecto lanza ErrorConfig.
 ConfigLlm cargarConfigLlm(const std::filesystem::path& casa);
+
+// Escribe la configuración en <casa>/config.json. La escritura es atómica
+// (archivo temporal + rename) para que un corte no deje la casa sin
+// configuración. Lanza ErrorConfig si no se puede escribir.
+void guardarConfigLlm(const ConfigLlm& config,
+                      const std::filesystem::path& casa);
 
 // true si la base apunta a la propia máquina (localhost, 127.0.0.1, ::1):
 // ahí la API key es opcional.

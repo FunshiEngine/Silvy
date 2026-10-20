@@ -31,6 +31,7 @@
 #include "Llm/GatewayOpenAi.h"
 #include "Llm/PeticionLlm.h"
 #include "Llm/ProtocoloOpenAi.h"
+#include "Modelo/EstadoLlm.h"
 #include "Nucleo/CatalogoComandos.h"
 #include "Nucleo/DependenciasNucleo.h"
 #include "Nucleo/NucleoSilvy.h"
@@ -1822,6 +1823,37 @@ bool probarSubproceso(const char* argv0) {
     return true;
 }
 
+// --- LLM local ------------------------------------------------------------
+
+void probarEstadoLlm() {
+    CHECK(silvy::textoDeEstadoLlm(silvy::EstadoLlm::SIN_MODELO) == "SIN_MODELO",
+          "estado sin modelo");
+    CHECK(silvy::textoDeEstadoLlm(silvy::EstadoLlm::DESCARGANDO) ==
+              "DESCARGANDO",
+          "estado descargando");
+    CHECK(silvy::textoDeEstadoLlm(silvy::EstadoLlm::LISTO) == "LISTO",
+          "estado listo");
+    CHECK(silvy::textoDeEstadoLlm(silvy::EstadoLlm::CARGANDO) == "CARGANDO",
+          "estado cargando");
+    CHECK(silvy::textoDeEstadoLlm(silvy::EstadoLlm::SERVIRVIENDO) ==
+              "SERVIRVIENDO",
+          "estado sirviendo");
+    CHECK(silvy::textoDeEstadoLlm(silvy::EstadoLlm::CAIDO) == "CAIDO",
+          "estado caido");
+
+    CHECK(silvy::todosLosEstadosLlm().size() == 6, "hay seis estados");
+    for (const auto estado : silvy::todosLosEstadosLlm()) {
+        const auto vuelta =
+            silvy::estadoLlmDesdeTexto(silvy::textoDeEstadoLlm(estado));
+        CHECK(vuelta.has_value() && *vuelta == estado,
+              "el estado vuelve de su texto");
+    }
+    CHECK(!silvy::estadoLlmDesdeTexto("NOPE").has_value(),
+          "un texto desconocido no es un estado");
+    CHECK(!silvy::estadoLlmDesdeTexto("listo").has_value(),
+          "el estado distingue mayusculas");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1869,6 +1901,8 @@ int main(int argc, char** argv) {
     probarSolicitudInvalidaEnNucleo();
     std::cout << "== comandos de errores ==\n";
     probarComandosDeErrores();
+    std::cout << "== estado del llm local ==\n";
+    probarEstadoLlm();
     std::cout << "== subproceso ==\n";
     const bool subproceso = probarSubproceso(argc > 0 ? argv[0] : "");
 
