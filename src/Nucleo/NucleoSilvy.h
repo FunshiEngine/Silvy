@@ -25,6 +25,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <string>
+
 namespace silvy {
 
 // Punto de entrada del núcleo desde el transporte: recibe la solicitud JSON
@@ -32,6 +34,16 @@ namespace silvy {
 // (normalización + persistencia + respuesta ok:false con exit code).
 ResultadoComando ejecutarSolicitudJson(const nlohmann::json& solicitud,
                                        DependenciasNucleo& dependencias);
+
+// Parsea el texto leído por el transporte (stdin o archivo) y lo ejecuta. Un
+// JSON malformado se devuelve como SOLICITUD_INVALIDA persistida.
+ResultadoComando ejecutarSolicitudTexto(const std::string& texto,
+                                        DependenciasNucleo& dependencias);
+
+// Error de transporte (argv inválido o lectura imposible de la solicitud): se
+// persiste igual que un error de comando y responde ok:false con exit 2.
+ResultadoComando reportarErrorDeTransporte(const std::string& mensaje,
+                                           DependenciasNucleo& dependencias);
 
 // Núcleo tipado para consumidores embebidos (tests incluidos): valida el
 // comando y despacha; los errores del comando se capturan y persisten igual

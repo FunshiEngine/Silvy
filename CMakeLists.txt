@@ -57,6 +57,9 @@ target_compile_definitions(silvy-tests PRIVATE
     SILVY_DIR_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
 )
 add_test(NAME silvy-tests COMMAND silvy-tests)
+# El e2e por subproceso se salta (código 77) si el binario Silvy no está
+# junto a las pruebas, por ejemplo en un build parcial.
+set_tests_properties(silvy-tests PROPERTIES SKIP_RETURN_CODE 77)
 
 # En Windows con MinGW, las DLLs del runtime no llegan solas al directorio de
 # salida: sin ellas el proceso muere al arrancar. Se copian junto al
@@ -76,3 +79,23 @@ function(silvy_copiar_dlls_runtime destino)
 endfunction()
 
 silvy_copiar_dlls_runtime(silvy-tests)
+
+add_executable(Silvy
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
+)
+target_link_libraries(Silvy PRIVATE silvy_core)
+target_compile_options(Silvy PRIVATE -Wall -Wextra)
+target_compile_definitions(Silvy PRIVATE
+    SILVY_VERSION="${PROJECT_VERSION}"
+)
+
+# El prompt de sistema default viaja junto al binario: si la casa no tiene
+# system_prompt.md, Silvy usa esta copia empaquetada.
+add_custom_command(TARGET Silvy POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/config"
+            "$<TARGET_FILE_DIR:Silvy>/config"
+    COMMENT "Copiando config/ junto a Silvy"
+)
+
+silvy_copiar_dlls_runtime(Silvy)

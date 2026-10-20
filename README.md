@@ -25,20 +25,61 @@ usuario desde la CLI.
 - [DISENO.md](DISENO.md) — **diseño y plan completos**: decisiones, arquitectura,
   protocolo, modelo de hilos, patrones de diseño, Clean Code, sistema de excepciones con
   registro persistente, convenciones, hitos y preguntas abiertas. Empezar por ahí.
+- [AGENTS.md](AGENTS.md) — convenciones para agentes y humanos que trabajen en el repo.
 
-## Compilación (prevista — ver H1 en el diseño)
+## Compilación
+
+Requisitos: CMake 3.15+, compilador C++17 y git (FetchContent trae `nlohmann/json` con
+tag fijo). En Windows/MSYS2 usar el toolchain de `mingw64`:
 
 ```bash
+export PATH=/mingw64/bin:$PATH
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 cd build && ctest --output-on-failure
 ```
 
+La primera configuración necesita red para clonar la dependencia. `config/` se copia junto
+al binario como prompt de sistema empaquetado.
+
+## Uso
+
+```bash
+build/Silvy --request-file solicitud.json
+build/Silvy --request < solicitud.json
+build/Silvy --home C:/ruta/a/mi-home --request-file solicitud.json
+```
+
+La respuesta JSON sale por stdout (una línea). Códigos de salida: `0` éxito, `1` fallo
+operacional, `2` solicitud inválida.
+
+### Comandos
+
+- `agent.step` — un paso del agente: historial completo, catálogo de herramientas,
+  prompt de sistema opcional y `maxIterations` como referencia para la CLI.
+- `errores.list` — últimos errores persistidos; `args` admite `limite` y `codigo`.
+- `errores.get` — detalle de un error por id (`args.id`); un id inexistente responde
+  `encontrado:false`, no es un fallo.
+
+### Casa de Silvy
+
+Los datos de runtime viven en `silvy-home/` junto al binario. Precedencia:
+`--home` > `SILVY_HOME` > junto al binario. El prompt de sistema se resuelve en este
+orden: `systemPrompt` del request > `<casa>/system_prompt.md` >
+`config/system_prompt.md` junto al binario.
+
+Las excepciones se registran en `<casa>/errores/errores.jsonl` (append-only, con rotación
+por tamaño y retención). Toda respuesta `ok:false` devuelve exactamente el objeto que quedó
+guardado.
+
 ## Estado
 
-En fase de diseño: el plan completo y sus decisiones están en
-[DISENO.md](DISENO.md). Sin código todavía.
+Esqueleto (H1) en pie: protocolo JSON de solicitud/respuesta, errores tipados con registro
+persistente, hilo trabajador, núcleo con despacho de comandos y tests con un gateway LLM
+falso determinista. El gateway real (HTTP + SSE), la descarga del GGUF y `llama-server`
+llegan en los hitos siguientes; por eso hoy el binario responde `NO_CONFIGURADO` a
+`agent.step`.
 
 ## Licencia
 
-Apache License 2.0 (prevista — igual que el motor y la CLI).
+Apache License 2.0 — igual que el motor y la CLI.

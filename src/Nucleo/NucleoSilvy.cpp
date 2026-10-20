@@ -87,6 +87,21 @@ ResultadoComando respuestaDeError(const ErrorSilvy& error,
     return resultado;
 }
 
+// Error de parseo/validación de una solicitud cruda: conserva el comando y el
+// id que se hayan podido leer para que la respuesta sea accionable.
+ResultadoComando respuestaDeSolicitudInvalida(
+    const nlohmann::json& solicitud, const ErrorSilvy& error,
+    DependenciasNucleo& dependencias) {
+    const nlohmann::json configuracion =
+        solicitud.is_object() && solicitud.contains("config")
+            ? solicitud["config"]
+            : nlohmann::json::object();
+    return respuestaDeError(error, campoSeguro(solicitud, "command"),
+                            idSeguro(solicitud), dependencias,
+                            campoSeguro(configuracion, "mode"),
+                            campoSeguro(configuracion, "modelName"));
+}
+
 std::string comandosValidos() {
     std::string texto;
     for (const ComandoSilvy comando : todosLosComandos()) {
@@ -105,19 +120,35 @@ ResultadoComando ejecutarSolicitudJson(const nlohmann::json& solicitud,
     try {
         const Solicitud parseada = solicitudDesdeJson(solicitud);
         return ejecutarSolicitud(parseada, dependencias);
+    } catch (const nlohmann::json::exception& error) {
+        // Un valor fuera de rango o con forma inesperada que se escape de la
+        // validación sigue siendo una solicitud inválida, no un fallo interno.
+        const ErrorSilvy tipado(
+            CodigoError::SOLICITUD_INVALIDA, false,
+            std::string("Solicitud inválida: ") + error.what());
+        return respuestaDeSolicitudInvalida(solicitud, tipado, dependencias);
     } catch (const std::exception& error) {
         // Aquí solo llegan fallos de parseo/validación: los errores de los
         // comandos ya se capturan en ejecutarSolicitud.
-        const ErrorSilvy tipado = envolver(error);
-        const nlohmann::json configuracion =
-            solicitud.is_object() && solicitud.contains("config")
-                ? solicitud["config"]
-                : nlohmann::json::object();
-        return respuestaDeError(tipado, campoSeguro(solicitud, "command"),
-                                idSeguro(solicitud), dependencias,
-                                campoSeguro(configuracion, "mode"),
-                                campoSeguro(configuracion, "modelName"));
+        return respuestaDeSolicitudInvalida(solicitud, envolver(error),
+                                            dependencias);
     }
+}
+
+ResultadoComando ejecutarSolicitudTexto(const std::string& texto,
+                                        DependenciasNucleo& dependencias) {
+    try {
+        return ejecutarSolicitudJson(nlohmann::json::parse(texto), dependencias);
+    } catch (const nlohmann::json::exception& error) {
+        return reportarErrorDeTransporte(
+            std::string("JSON inválido: ") + error.what(), dependencias);
+    }
+}
+
+ResultadoComando reportarErrorDeTransporte(
+    const std::string& mensaje, DependenciasNucleo& dependencias) {
+    const ErrorSilvy error(CodigoError::SOLICITUD_INVALIDA, false, mensaje);
+    return respuestaDeError(error, {}, std::nullopt, dependencias, {}, {});
 }
 
 ResultadoComando ejecutarSolicitud(const Solicitud& solicitud,

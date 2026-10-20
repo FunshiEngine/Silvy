@@ -35,9 +35,11 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -45,6 +47,10 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -163,6 +169,40 @@ struct EntornoNucleo final {
 
 std::vector<std::string> lineasDeErrores(const EntornoNucleo& entorno) {
     return leerLineas(entorno.casa / "errores" / "errores.jsonl");
+}
+
+struct SalidaProceso final {
+    int codigo = -1;
+    std::string salida;
+};
+
+// Ejecuta un comando de shell y captura su stdout y su código de salida.
+SalidaProceso ejecutarProceso(const std::string& comando) {
+#ifdef _WIN32
+    FILE* tuberia = _popen(comando.c_str(), "r");
+#else
+    FILE* tuberia = popen(comando.c_str(), "r");
+#endif
+    if (tuberia == nullptr) {
+        return {};
+    }
+    std::array<char, 4096> buffer{};
+    std::string salida;
+    while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), tuberia) !=
+           nullptr) {
+        salida += buffer.data();
+    }
+#ifdef _WIN32
+    const int codigo = _pclose(tuberia);
+#else
+    const int estado = pclose(tuberia);
+    const int codigo = WIFEXITED(estado) ? WEXITSTATUS(estado) : -1;
+#endif
+    return {codigo, salida};
+}
+
+std::string citar(const fs::path& ruta) {
+    return "\"" + ruta.string() + "\"";
 }
 
 // Gateway que lanza una excepción ajena al dominio para probar la
@@ -859,6 +899,21 @@ void probarSolicitudInvalidaEnNucleo() {
     CHECK(sinComando.codigoSalida ==
               silvy::codigosSalida::kSolicitudInvalida,
           "sin command sale 2");
+
+    const auto textoRoto =
+        silvy::ejecutarSolicitudTexto("{ no es json", dependencias);
+    CHECK(textoRoto.codigoSalida == silvy::codigosSalida::kSolicitudInvalida,
+          "texto no JSON sale 2");
+    CHECK(textoRoto.respuesta.aJson()["error"]["codigo"] ==
+              "SOLICITUD_INVALIDA",
+          "texto no JSON tipado");
+
+    const auto transporte =
+        silvy::reportarErrorDeTransporte("argv roto", dependencias);
+    CHECK(transporte.codigoSalida == silvy::codigosSalida::kSolicitudInvalida,
+          "error de transporte sale 2");
+    CHECK(transporte.respuesta.aJson()["error"]["mensaje"] == "argv roto",
+          "error de transporte conserva el mensaje");
 }
 
 void probarComandosDeErrores() {
@@ -956,9 +1011,111 @@ void probarComandosDeErrores() {
           "codigo desconocido sale 2");
 }
 
+// E2E del binario real por subproceso. Devuelve false si el binario no está
+// junto a las pruebas (build parcial): la suite completa se salta con 77.
+bool probarSubproceso(const char* argv0) {
+#ifdef _WIN32
+    const fs::path nombreBinario = "Silvy.exe";
+#else
+    const fs::path nombreBinario = "Silvy";
+#endif
+    const fs::path bin =
+        fs::absolute(argv0).parent_path() / nombreBinario;
+    if (!fs::exists(bin)) {
+        std::cout << "SALTADO: no se encontro " << bin.string()
+                  << " para la prueba de subproceso\n";
+        return false;
+    }
+
+    CarpetaPrueba carpeta("subproceso");
+    const fs::path casa = carpeta.ruta() / "home";
+#ifdef _WIN32
+    // _popen pasa el comando por cmd.exe, que se come las comillas iniciales
+    // de un ejecutable citado; `call` conserva la ruta con espacios.
+    const std::string base =
+        "call " + citar(bin) + " --home " + citar(casa) + " ";
+#else
+    const std::string base = citar(bin) + " --home " + citar(casa) + " ";
+#endif
+
+    // Respuesta determinista por --request-file, con eco del id.
+    const fs::path listadoJson = carpeta.ruta() / "listado.json";
+    escribirArchivo(listadoJson,
+                    R"({"command":"errores.list","id":"eco-1"})");
+    const SalidaProceso listado =
+        ejecutarProceso(base + "--request-file " + citar(listadoJson));
+    CHECK(listado.codigo == 0, "subproceso: errores.list sale 0");
+    CHECK(listado.salida.find("\"ok\":true") != std::string::npos,
+          "subproceso: respuesta ok");
+    CHECK(listado.salida.find("\"id\":\"eco-1\"") != std::string::npos,
+          "subproceso: eco del id");
+    CHECK(fs::exists(casa / "errores"),
+          "subproceso: la casa se crea al arrancar");
+
+    // La misma solicitud por stdin.
+    const SalidaProceso porStdin =
+        ejecutarProceso(base + "--request < " + citar(listadoJson));
+    CHECK(porStdin.codigo == 0, "subproceso: --request sale 0");
+    CHECK(porStdin.salida.find("\"ok\":true") != std::string::npos,
+          "subproceso: --request responde");
+
+    // Excepción forzada: sale ok:false, exit 2 y queda en errores.jsonl.
+    const fs::path errorJson = carpeta.ruta() / "error.json";
+    escribirArchivo(errorJson, R"({"command":"volar","id":"malo-1"})");
+    const SalidaProceso error =
+        ejecutarProceso(base + "--request-file " + citar(errorJson));
+    CHECK(error.codigo == 2, "subproceso: comando invalido sale 2");
+    CHECK(error.salida.find("\"ok\":false") != std::string::npos,
+          "subproceso: error ok:false");
+    CHECK(error.salida.find("SOLICITUD_INVALIDA") != std::string::npos,
+          "subproceso: error tipado");
+    const auto lineas = leerLineas(casa / "errores" / "errores.jsonl");
+    CHECK(lineas.size() == 1, "subproceso: un error persistido");
+    if (!lineas.empty()) {
+        const auto guardado = nlohmann::json::parse(lineas.front());
+        CHECK(guardado["comando"] == "volar",
+              "subproceso: comando guardado");
+        CHECK(error.salida.find(
+                  "\"id\":\"" + guardado["id"].get<std::string>() + "\"") !=
+                  std::string::npos,
+              "subproceso: el error guardado es el de la respuesta");
+    }
+
+    // JSON malformado: solicitud inválida y persistida.
+    const fs::path rotoJson = carpeta.ruta() / "roto.json";
+    escribirArchivo(rotoJson, "{ no es json");
+    const SalidaProceso roto =
+        ejecutarProceso(base + "--request-file " + citar(rotoJson));
+    CHECK(roto.codigo == 2, "subproceso: JSON malformado sale 2");
+    CHECK(roto.salida.find("SOLICITUD_INVALIDA") != std::string::npos,
+          "subproceso: JSON malformado tipado");
+
+    // Sin gateway: responde NO_CONFIGURADO con el prompt empaquetado.
+    const fs::path pasoJson = carpeta.ruta() / "paso.json";
+    escribirArchivo(
+        pasoJson,
+        R"({"command":"agent.step","messages":[{"role":"user","content":"hola"}]})");
+    const SalidaProceso paso =
+        ejecutarProceso(base + "--request-file " + citar(pasoJson));
+    CHECK(paso.codigo == 1, "subproceso: sin gateway sale 1");
+    CHECK(paso.salida.find("NO_CONFIGURADO") != std::string::npos,
+          "subproceso: sin gateway NO_CONFIGURADO");
+    CHECK(paso.salida.find("gateway") != std::string::npos,
+          "subproceso: usa el prompt empaquetado junto al binario");
+
+    // Uso inválido de argv: solicitud inválida con exit 2.
+    const SalidaProceso ambos = ejecutarProceso(
+        base + "--request --request-file " + citar(listadoJson));
+    CHECK(ambos.codigo == 2, "subproceso: fuentes dobles sale 2");
+    CHECK(ambos.salida.find("\"ok\":false") != std::string::npos,
+          "subproceso: fuentes dobles ok:false");
+
+    return true;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     std::cout << "== errores ==\n";
     probarErrores();
     std::cout << "== hilo trabajador ==\n";
@@ -993,8 +1150,16 @@ int main() {
     probarSolicitudInvalidaEnNucleo();
     std::cout << "== comandos de errores ==\n";
     probarComandosDeErrores();
+    std::cout << "== subproceso ==\n";
+    const bool subproceso = probarSubproceso(argc > 0 ? argv[0] : "");
 
     std::cout << (fallos == 0 ? "OK" : "FALLOS") << ": " << total
               << " comprobaciones\n";
-    return fallos == 0 ? 0 : 1;
+    if (fallos > 0) {
+        return 1;
+    }
+    if (!subproceso) {
+        return 77;
+    }
+    return 0;
 }

@@ -23,6 +23,16 @@
 #include <fstream>
 #include <iterator>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace silvy {
 
 namespace {
@@ -52,6 +62,30 @@ std::filesystem::path resolverCasa(const FuentesCasa& fuentes) {
         return std::filesystem::absolute(*fuentes.variableEntorno);
     }
     return std::filesystem::absolute(fuentes.directorioBinario) / "silvy-home";
+}
+
+std::filesystem::path directorioDelBinario(const char* argv0) {
+#ifdef _WIN32
+    std::wstring buffer(32768, L'\0');
+    const DWORD largo =
+        GetModuleFileNameW(nullptr, buffer.data(),
+                           static_cast<DWORD>(buffer.size()));
+    if (largo > 0 && largo < buffer.size()) {
+        buffer.resize(largo);
+        return std::filesystem::path(buffer).parent_path();
+    }
+#else
+    std::error_code error;
+    const std::filesystem::path ejecutable =
+        std::filesystem::read_symlink("/proc/self/exe", error);
+    if (!error) {
+        return ejecutable.parent_path();
+    }
+#endif
+    if (argv0 != nullptr && *argv0 != '\0') {
+        return std::filesystem::absolute(argv0).parent_path();
+    }
+    return std::filesystem::current_path();
 }
 
 std::string cargarPromptSistema(const std::optional<std::string>& override,

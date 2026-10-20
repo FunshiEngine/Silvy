@@ -478,6 +478,8 @@ Silvy/
 ├── src/
 │   ├── main.cpp            # Solo argv + lectura de la solicitud (stdin/--request-file)
 │   │                       #   y escritura de la respuesta a stdout. Sin lógica.
+│   ├── Comandos/           #   Un módulo por dominio de comando (agent.step,
+│   │                       #   errores.list, errores.get)
 │   ├── Nucleo/             #   Protocolo: Solicitud/Respuesta, dispatch por enum,
 │   │                       #   catálogo de comandos
 │   ├── Errores/            #   Jerarquía ErrorSilvy + CodigoError, clasificadores

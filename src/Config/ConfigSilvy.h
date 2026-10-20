@@ -39,6 +39,11 @@ struct FuentesCasa final {
 // Precedencia: --home > SILVY_HOME > <directorio del binario>/silvy-home.
 std::filesystem::path resolverCasa(const FuentesCasa& fuentes);
 
+// Directorio del ejecutable en ejecución: usa la ruta real del proceso cuando
+// el sistema la expone y cae a argv[0] si no. Se usa para ubicar la casa por
+// defecto y el prompt de sistema empaquetado.
+std::filesystem::path directorioDelBinario(const char* argv0);
+
 // Prompt de sistema efectivo: override del request > <casa>/system_prompt.md >
 // <directorio del binario>/config/system_prompt.md. Sin ninguna fuente lanza
 // NO_CONFIGURADO con la ubicación esperada.
