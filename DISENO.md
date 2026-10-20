@@ -78,6 +78,10 @@ Registro de lo acordado en la planificación. Cada entrada es un cierre, no una 
 | D34 | **Dependencias C++ (P12)** | `nlohmann/json` y `cpp-httplib` por **FetchContent con tag fijo** (header-only, sin vendorizar): `nlohmann/json` desde H1 y `cpp-httplib` cuando llegue el cliente HTTP. Mismo patrón que FTXUI en la CLI. |
 | D35 | **Casa de Silvy (P13)** | Directorio de datos de runtime **`silvy-home/` junto al binario** (estilo `app-home` de FunshiEngineAI): config, prompt de sistema editable, modelo GGUF, `errores/` y logs. Precedencia: `--home` > variable `SILVY_HOME` > junto al binario. |
 | D36 | **Orden de construcción de H1 (P14)** | Errores (jerarquía + registro persistente) → protocolo (tipos, parseo, respuesta, catálogo) → gateway falso con tests → primitivas de concurrencia → `main` de transporte → e2e por subproceso. |
+| D37 | **Capacidades (P1)** | Sin handshake: la CLI manda el catálogo completo de herramientas en cada `agent.step`; Silvy es stateless y no guarda un paso de descubrimiento. |
+| D38 | **Errores del protocolo (P2)** | `ok:false` con `error` = objeto tipado persistido (`id`, `ts`, `codigo` UPPER_SNAKE, `mensaje`, `reintentable`, `comando`, `modo`, `modelo`, `detalle`, `causa`). Exit codes: `0` éxito, `1` fallo operacional, `2` solicitud inválida. Los errores deterministas no son reintentables. |
+| D39 | **Streaming en el protocolo (P8)** | Sin campo reservado en el MVP: cada paso responde el turno completo. Cuando se diseñe streaming (D16) se agrega con incremento de `apiVersion`, no como placeholder. |
+| D40 | **Registro de errores (P9)** | `errores.jsonl` con rotación de 256 KB, 10 archivos rotados y TTL de 30 días por defecto (configurables); consulta por `errores.list`/`errores.get` por JSON, suficiente para la CLI; cada componente persiste sus propios errores (D18). |
 
 ### Skills: definición
 
@@ -521,15 +525,11 @@ Reglas de arquitectura que sostienen la estructura (mismo patrón que la CLI):
 
 | # | Pregunta | Hit. |
 |---|---|---|
-| P1 | Handshake de capacidades: ¿la CLI manda el catálogo de tools completo en cada request, o hay un paso inicial de capabilities? | H1 |
-| P2 | Formato exacto de errores tipados (códigos, mensajes, exit codes) y su semántica `ok:false`. | H1 |
 | P3 | Política de recorte/resumen del historial en la CLI (¿cuántos mensajes, qué dispara el resumen?). | H4 |
 | P4 | Validación de lo generado según lenguaje: C++ vía `script.compile`; ¿shaders, HTML/CSS/JS cómo se verifican? (D10/D11). | H5–H6 |
 | P5 | Mecanismo concreto de skills: formato de archivo, cuándo se inyectan, dónde se configuran. | H6 |
 | P6 | Flujo de modificación de código del **motor** (D10): qué herramientas de la CLI cubren tocar `.cpp`/tests/CMake del repo del motor (hoy la CLI opera sobre proyectos). | H6 |
 | P7 | Relación con CHATIA a futuro: ¿comparten la capa LLM de Silvy o cada uno lo suyo? | futuro |
-| P8 | Diseño reservado del streaming en el protocolo de paso (campo/evento reservado sin implementar en MVP). | H1 |
-| P9 | Registro de excepciones: retención concreta (días/cantidad), quién lo consulta hoy sin UI (`errores.list` por JSON basta, ¿o hace falta un `silvy errores` legible a mano?) y si la CLI persiste también sus propios errores junto a los de Silvy o cada componente lo suyo (D18). | H1–H4 |
 | P10 | Concurrencia: confirmar el modelo de hilos de §6 contra el caso real de `agent.step` largo —¿el principal responde otros comandos o serializa todo hasta terminar el paso? y política de descargas múltiples (¿una a la vez o por archivo?). | H1–H3 |
 | P11 | Circuit breaker + fallback local↔remoto (§7): ¿se implementa solo si habilitamos modo dual LOCAL↔REMOTO simultáneo, como resolvió FunshiEngineAI, o Silvy lo necesita desde H3? | H3+ |
 
