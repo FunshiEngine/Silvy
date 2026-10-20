@@ -82,6 +82,7 @@ Registro de lo acordado en la planificación. Cada entrada es un cierre, no una 
 | D38 | **Errores del protocolo (P2)** | `ok:false` con `error` = objeto tipado persistido (`id`, `ts`, `codigo` UPPER_SNAKE, `mensaje`, `reintentable`, `comando`, `modo`, `modelo`, `detalle`, `causa`). Exit codes: `0` éxito, `1` fallo operacional, `2` solicitud inválida. Los errores deterministas no son reintentables. |
 | D39 | **Streaming en el protocolo (P8)** | Sin campo reservado en el MVP: cada paso responde el turno completo. Cuando se diseñe streaming (D16) se agrega con incremento de `apiVersion`, no como placeholder. |
 | D40 | **Registro de errores (P9)** | `errores.jsonl` con rotación de 256 KB, 10 archivos rotados y TTL de 30 días por defecto (configurables); consulta por `errores.list`/`errores.get` por JSON, suficiente para la CLI; cada componente persiste sus propios errores (D18). |
+| D41 | **Timeout vs. fallo de transporte** | El **presupuesto total** (`timeoutMs`) es la única fuente de `TIMEOUT`: si se agotó, el paso se cancela por tiempo. Cualquier otro fallo de transporte (conexión rechazada, DNS, TLS, corte de lectura, timeout del socket) se clasifica como fallo de red: `SERVIDOR_CAIDO` en destino local y `MODELO_NO_DISPONIBLE` en remoto, siempre reintentable. La clasificación no depende de cómo la biblioteca HTTP reporte el fallo en cada plataforma. |
 
 ### Skills: definición
 
@@ -427,6 +428,7 @@ Punto único de entrada para errores ajenos (no controlados por nosotros):
 |---|---|---|
 | `desdeHttp(status, cuerpo, esLocal)` | respuesta HTTP no-2xx | código mapeado por status; en el 400, *keyword-sniffing* (`context`, `kv cache`, `tokens`) para distinguir `CONTEXTO_AGOTADO`; snippet de ~300 chars del cuerpo en el mensaje |
 | `desdeRed(detalle, esLocal)` | fallo de transporte sin respuesta HTTP (conexión, DNS, TLS, corte de lectura) | `SERVIDOR_CAIDO` (local) / `MODELO_NO_DISPONIBLE` (remoto), siempre reintentable |
+| `desdeTransporte(error, esLocal, presupuestoAgotado)` | fallo del cliente HTTP sin respuesta HTTP | si el presupuesto total ya se agotó → `TIMEOUT`; si no → `desdeRed` (D41) |
 | `envolver(excepcion)` | cualquier `std::exception` no identificada | `DESCONOCIDO` con causa; `std::timeout`→`TIMEOUT`, cancelación→`CANCELADO` |
 
 Mapeo concreto de estados HTTP a códigos:
@@ -445,6 +447,11 @@ Mapeo concreto de estados HTTP a códigos:
 
 Regla dura: **timeout ≠ cancelación**. `CANCELADO` nunca es reintentable ni debe mostrarse
 como fallo (la canceló el humano/UI).
+
+El presupuesto total (`timeoutMs`) es el único reloj de Silvy: el cliente HTTP recibe ese
+presupuesto más un margen, de modo que el agotamiento lo decide Silvy y no el redondeo del
+sistema al fijar los tiempos de socket. Así `TIMEOUT` significa siempre "el paso no terminó a
+tiempo" y un fallo de red significa "no hubo ni una respuesta" (D41).
 
 ### 9.3 Errores accionables
 
@@ -541,14 +548,17 @@ Silvy/
 │   ├── Errores/            #   Jerarquía ErrorSilvy + CodigoError, clasificadores
 │   │                       #   (§9.1–9.2), registro persistente errores.jsonl (§9.4)
 │   │                       #   con rotación + cola de escritura
-│   ├── Llm/                #   LlmGateway (interface), ClienteHttp + SSE,
-│   │                       #   modos Local/Remoto, tool-calling OpenAI
+│   ├── Llm/                #   LlmGateway (interfaz), ProtocoloOpenAi (cuerpo de la
+│   │                       #   petición + stream SSE + tool-calling), GatewayOpenAi
+│   │                       #   (transporte HTTP, reintentos, cancelación) y
+│   │                       #   FabricaGateway (gateway según la configuración)
 │   ├── Modelo/             #   Descarga GGUF con reanudación + gestión de llama-server
 │   │                       #   (hilo supervisor + pump de stderr, §6)
 │   ├── Concurrencia/       #   Primitivas: hilo dedicado con cancelación, cola de
 │   │                       #   resultados al principal, flag atómica (§6)
 │   └── Config/             #   Config propio de Silvy + validar() fail-fast (§8)
-├── tests/                  #   Tests headless (CHECK + ctest), incluye el gateway falso
+├── tests/                  #   Tests headless (CHECK + ctest), incluye el gateway
+│                           #   falso y el servidor HTTP falso (mock OpenAI)
 └── .agentes/               #   Memoria de trabajo (ignorada por git)
 ```
 

@@ -29,9 +29,12 @@ build/Silvy --request < solicitud.json
 - **`cmake` puede no estar en el PATH**: en Windows/MSYS2 usar
   `C:/msys64/mingw64/bin/cmake.exe` con `PATH=/mingw64/bin:$PATH`, y el resto
   del toolchain de `mingw64` (`ninja`, `g++`). Igual que la CLI.
-- **Dependencias por FetchContent con tag fijo**: `nlohmann/json` (protocolo).
-  La primera configuración necesita red. `cpp-httplib` (cliente HTTP hacia el
-  LLM) se trae con el mismo mecanismo al implementar la capa remota.
+- **Dependencias por FetchContent con tag fijo**: `nlohmann/json` (protocolo) y
+  `cpp-httplib` (cliente HTTP hacia el LLM y servidor de pruebas). La primera
+  configuración necesita red. `cpp-httplib` se usa con `SOURCE_SUBDIR` a una
+  carpeta inexistente para no ejecutar el CMake de la dependencia, y con
+  `CPPHTTPLIB_OPENSSL_SUPPORT` si el sistema tiene OpenSSL (https); sin él, el
+  cliente solo habla `http://`.
 - **Build y tests como parte del cambio**: `silvy_core` lista sus fuentes
   explícitamente (no hay glob). Un `.cpp` nuevo se agrega al target en el mismo
   commit que lo introduce.
@@ -50,6 +53,10 @@ build/Silvy --request < solicitud.json
 - **Gateway LLM falso**: `tests/GatewayFalso.*` implementa la interfaz
   `LlmGateway` con respuestas guionizadas y deterministas; es lo que prueba
   `agent.step` sin red ni modelo.
+- **Servidor HTTP falso**: `tests/ServidorFalso.*` levanta un servidor local
+  que habla como una API compatible OpenAI (respuestas guionizadas, SSE por
+  bloques, errores HTTP y demoras); es lo que prueba el gateway remoto sin
+  red ni modelo.
 - **Código de salida 77 = *skipped*, no fallo**. La prueba que lanza el binario
   `Silvy` como subproceso lo busca junto a `silvy-tests`; si no está (p. ej.
   build parcial), se salta en lugar de fallar.
@@ -71,8 +78,11 @@ src/
 ├── Errores/                # Jerarquía ErrorSilvy + CodigoError, clasificador
 │                           #   envolver() y registro persistente (errores.jsonl
 │                           #   con rotación y retención).
-├── Llm/                    # LlmGateway (interfaz), tipos de la petición y
-│                           #   armado del paso del agente.
+├── Llm/                    # LlmGateway (interfaz), tipos de la petición,
+│                           #   armado del paso del agente, ProtocoloOpenAi
+│                           #   (cuerpo OpenAI + stream SSE + tool-calling),
+│                           #   GatewayOpenAi (transporte HTTP, reintentos,
+│                           #   cancelación) y FabricaGateway.
 ├── Config/                 # Casa de Silvy, ajustes y prompt de sistema
 │                           #   (default en config/system_prompt.md).
 ├── Concurrencia/           # Hilo trabajador con cola (mutex/cv) y parada con

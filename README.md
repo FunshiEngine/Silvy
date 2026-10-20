@@ -29,8 +29,8 @@ usuario desde la CLI.
 
 ## Compilación
 
-Requisitos: CMake 3.15+, compilador C++17 y git (FetchContent trae `nlohmann/json` con
-tag fijo). En Windows/MSYS2 usar el toolchain de `mingw64`:
+Requisitos: CMake 3.15+, compilador C++17 y git (FetchContent trae `nlohmann/json` y
+`cpp-httplib` con tag fijo). En Windows/MSYS2 usar el toolchain de `mingw64`:
 
 ```bash
 export PATH=/mingw64/bin:$PATH
@@ -39,8 +39,9 @@ cmake --build build -j$(nproc)
 cd build && ctest --output-on-failure
 ```
 
-La primera configuración necesita red para clonar la dependencia. `config/` se copia junto
-al binario como prompt de sistema empaquetado.
+La primera configuración necesita red para clonar las dependencias. `config/` se copia junto
+al binario como prompt de sistema empaquetado. Si el sistema tiene OpenSSL, el cliente HTTP
+habla también `https://`; sin él, solo `http://`.
 
 ## Uso
 
@@ -72,13 +73,47 @@ Las excepciones se registran en `<casa>/errores/errores.jsonl` (append-only, con
 por tamaño y retención). Toda respuesta `ok:false` devuelve exactamente el objeto que quedó
 guardado.
 
+### Configuración del LLM
+
+El archivo opcional `<casa>/config.json` describe con qué LLM habla Silvy. El `config` del
+request pisa los campos presentes; los campos desconocidos se ignoran.
+
+```jsonc
+{
+  "mode": "REMOTE",                          // LOCAL | REMOTE
+  "baseUrl": "https://api.openai.com/v1",    // base de la API compatible OpenAI
+  "apiKey": "sk-...",                        // obligatoria en REMOTE salvo en localhost
+  "modelName": "phi-4-mini-instruct",
+  "temperature": 0.2,
+  "timeoutMs": 180000,                       // presupuesto total del paso, incluido el stream
+  "connectTimeoutMs": 10000,
+  "maxRetries": 2,                           // reintentos solo sobre errores reintentables
+  "retryBaseMs": 300                         // base del backoff exponencial
+}
+```
+
+La configuración se valida al arrancar y en cada paso: si algo falta o es inválido, el
+error `NO_CONFIGURADO` lista **todos** los problemas juntos. El modo `REMOTE` habla por
+HTTP + SSE con una API compatible OpenAI, con tool-calling real; el modo `LOCAL` (llama-server
+con un GGUF propio) todavía no está implementado.
+
+Los errores del proveedor llegan tipados: `CLAVE_INVALIDA` (401/403), `SIN_CUOTA` (429),
+`MODELO_NO_DISPONIBLE` (404 o destino remoto inalcanzable), `CONTEXTO_AGOTADO` (400 por
+contexto), `SERVIDOR_CAIDO` (5xx o fallo de red en local), `TIMEOUT` (se agotó el
+presupuesto del paso) y `CANCELADO` (lo pidió el humano). Solo los reintentables repiten
+petición, con backoff exponencial.
+
 ## Estado
 
-Esqueleto (H1) en pie: protocolo JSON de solicitud/respuesta, errores tipados con registro
+H1 (esqueleto) en pie: protocolo JSON de solicitud/respuesta, errores tipados con registro
 persistente, hilo trabajador, núcleo con despacho de comandos y tests con un gateway LLM
-falso determinista. El gateway real (HTTP + SSE), la descarga del GGUF y `llama-server`
-llegan en los hitos siguientes; por eso hoy el binario responde `NO_CONFIGURADO` a
-`agent.step`.
+falso determinista.
+
+H2 (LLM remoto) en pie: cliente HTTP + SSE contra una API compatible OpenAI, tool-calling
+real, clasificación de errores por estado y por fallo de transporte, reintentos con backoff
+solo sobre errores reintentables y cancelación del paso en curso. Con `config.json` en modo
+`REMOTE`, `agent.step` ya habla con el proveedor; en modo `LOCAL` el binario responde
+`NO_CONFIGURADO` porque la descarga del GGUF y `llama-server` llegan en el hito siguiente.
 
 ## Licencia
 
