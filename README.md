@@ -54,6 +54,11 @@ build/Silvy --home C:/ruta/a/mi-home --request-file solicitud.json
 La respuesta JSON sale por stdout (una línea). Códigos de salida: `0` éxito, `1` fallo
 operacional, `2` solicitud inválida.
 
+Desde stdin se atienden **varias** solicitudes seguidas, una por objeto JSON, hasta el
+final del flujo: el runtime del LLM local (modelo descargado, descarga en curso y
+`llama-server`) vive en el proceso y sobrevive entre pasos. Con `--request-file` se
+atiende una sola solicitud.
+
 ### Comandos
 
 - `agent.step` — un paso del agente: historial completo, catálogo de herramientas,
@@ -61,6 +66,12 @@ operacional, `2` solicitud inválida.
 - `errores.list` — últimos errores persistidos; `args` admite `limite` y `codigo`.
 - `errores.get` — detalle de un error por id (`args.id`); un id inexistente responde
   `encontrado:false`, no es un fallo.
+- `llm.status` — estado del LLM local: modo, modelo, servidor vivo y puerto, bytes
+  descargados, porcentaje de carga y último error.
+- `llm.download` — inicia o reanuda la descarga del GGUF en segundo plano.
+- `llm.cancel` — cancela la descarga en curso; el `.part` se conserva.
+- `llm.mode` — cambia `LOCAL`↔`REMOTE` (`args.mode`); escribe la configuración
+  resultante en `<casa>/config.json` y detiene el servidor local al pasar a `REMOTE`.
 
 ### Casa de Silvy
 
@@ -88,14 +99,31 @@ request pisa los campos presentes; los campos desconocidos se ignoran.
   "timeoutMs": 180000,                       // presupuesto total del paso, incluido el stream
   "connectTimeoutMs": 10000,
   "maxRetries": 2,                           // reintentos solo sobre errores reintentables
-  "retryBaseMs": 300                         // base del backoff exponencial
+  "retryBaseMs": 300,                        // base del backoff exponencial
+
+  "hfBaseUrl": "https://huggingface.co",     // base de descarga del GGUF (LOCAL)
+  "hfRepo": "unsloth/Phi-4-mini-instruct-GGUF",
+  "hfFile": "Phi-4-mini-instruct-Q4_K_M.gguf",
+  "llamaServerPath": "llama-server",         // ruta o nombre en el PATH (LOCAL)
+  "contextSize": 8192,                       // contexto pedido al servidor local
+  "gpuLayers": 0,                            // capas de GPU (-ngl); 0 = solo CPU
+  "serverPort": 8081,                        // puerto preferido del servidor local
+  "portScan": 20,                            // cuántos puertos se prueban
+  "loadTimeoutMs": 180000                    // presupuesto de carga del modelo
 }
 ```
 
 La configuración se valida al arrancar y en cada paso: si algo falta o es inválido, el
 error `NO_CONFIGURADO` lista **todos** los problemas juntos. El modo `REMOTE` habla por
-HTTP + SSE con una API compatible OpenAI, con tool-calling real; el modo `LOCAL` (llama-server
-con un GGUF propio) todavía no está implementado.
+HTTP + SSE con una API compatible OpenAI, con tool-calling real. El modo `LOCAL` descarga
+el GGUF a la casa (reanudable, con lock) y levanta `llama-server` como proceso hijo: el
+log del servidor queda en `<casa>/logs/llama-server.log` y el modo `LOCAL` usa su puerto
+como base de la API. Silvy **no** compila `llama.cpp`: el ejecutable lo aporta el
+usuario, por `llamaServerPath` o por el `PATH`.
+
+El GGUF y el modelo pesan: la descarga por defecto (Phi-4-mini Q4_K_M) ronda los 2,4 GB.
+La `apiKey` se guarda en `<casa>/config.json` en texto plano, como es habitual en las
+herramientas locales.
 
 Los errores del proveedor llegan tipados: `CLAVE_INVALIDA` (401/403), `SIN_CUOTA` (429),
 `MODELO_NO_DISPONIBLE` (404 o destino remoto inalcanzable), `CONTEXTO_AGOTADO` (400 por
@@ -111,9 +139,13 @@ falso determinista.
 
 H2 (LLM remoto) en pie: cliente HTTP + SSE contra una API compatible OpenAI, tool-calling
 real, clasificación de errores por estado y por fallo de transporte, reintentos con backoff
-solo sobre errores reintentables y cancelación del paso en curso. Con `config.json` en modo
-`REMOTE`, `agent.step` ya habla con el proveedor; en modo `LOCAL` el binario responde
-`NO_CONFIGURADO` porque la descarga del GGUF y `llama-server` llegan en el hito siguiente.
+solo sobre errores reintentables y cancelación del paso en curso.
+
+H3 (LLM local) en pie: descarga reanudable del GGUF con lock y verificación de integridad,
+proceso hijo y supervisor de `llama-server` (health-check, apagado escalonado, log en
+archivo), runtime local dentro del proceso y los comandos `llm.status/download/cancel/mode`.
+El modo `LOCAL` real (`agent.step` contra `llama-server`) necesita el ejecutable, que
+Silvy no compila.
 
 ## Licencia
 

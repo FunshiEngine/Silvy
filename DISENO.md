@@ -83,6 +83,10 @@ Registro de lo acordado en la planificación. Cada entrada es un cierre, no una 
 | D39 | **Streaming en el protocolo (P8)** | Sin campo reservado en el MVP: cada paso responde el turno completo. Cuando se diseñe streaming (D16) se agrega con incremento de `apiVersion`, no como placeholder. |
 | D40 | **Registro de errores (P9)** | `errores.jsonl` con rotación de 256 KB, 10 archivos rotados y TTL de 30 días por defecto (configurables); consulta por `errores.list`/`errores.get` por JSON, suficiente para la CLI; cada componente persiste sus propios errores (D18). |
 | D41 | **Timeout vs. fallo de transporte** | El **presupuesto total** (`timeoutMs`) es la única fuente de `TIMEOUT`: si se agotó, el paso se cancela por tiempo. Cualquier otro fallo de transporte (conexión rechazada, DNS, TLS, corte de lectura, timeout del socket) se clasifica como fallo de red: `SERVIDOR_CAIDO` en destino local y `MODELO_NO_DISPONIBLE` en remoto, siempre reintentable. La clasificación no depende de cómo la biblioteca HTTP reporte el fallo en cada plataforma. |
+| D42 | **Silvy no compila llama.cpp** | Silvy **no** clona ni compila `llama.cpp`: el ejecutable `llama-server` lo aporta el usuario, por ruta explícita (`llamaServerPath`) o por el `PATH`. Si no está, la respuesta es un `NO_CONFIGURADO` accionable que dice dónde buscarlo. Compilar toolchains es trabajo de la CLI (D33), igual que compilar el código del agente. |
+| D43 | **Log del servidor en archivo** | El `stdout` y el `stderr` del proceso hijo se vuelcan directamente en `<casa>/logs/llama-server.log`. Así el hijo nunca se bloquea escribiendo (no hay tubería que se llene) y el tail que acompaña a los errores de arranque se lee del archivo, acotado a 12 líneas / 4 KB. No hace falta un hilo de pump en memoria (§6). |
+| D44 | **Secretos en la casa** | `<casa>/config.json` guarda la `apiKey` **en texto plano**: la casa es un directorio del usuario y el archivo no se comparte. Es la misma decisión que toman las herramientas locales; a cambio, `llm.mode` puede dejar la configuración completa (incluidas las credenciales del modo remoto) escrita en la casa. |
+| D45 | **Runtime local dentro del proceso** | El LLM local es un **runtime del binario**, no un dato de la solicitud: el modelo descargado, la descarga en curso y `llama-server` viven en el proceso y sobreviven entre solicitudes. Por eso `main` atiende **varias** solicitudes seguidas desde stdin (una por objeto JSON) y solo una con `--request-file`. |
 
 ### Skills: definición
 
@@ -212,9 +216,16 @@ Además de `agent.step`, la CLI puede invocar:
 - `errores.get` — detalle por id: `args: { "id": "…" }`; devuelve
   `{ "encontrado": true|false, "registro": { … } | null }` (un id inexistente
   no es un fallo).
-- `llm.status` — modo, modelo, si `llama-server` está vivo, progreso de descarga.
-- `llm.download` — inicia/reanuda la descarga del GGUF.
-- `llm.mode` — cambia LOCAL↔REMOTO.
+- `llm.status` — estado del LLM local: modo, modelo, si `llama-server` está vivo y en
+  qué puerto, bytes descargados y totales, porcentaje de carga leído del log del
+  servidor y el último error del runtime.
+- `llm.download` — inicia (o reanuda) la descarga del GGUF en segundo plano. No bloquea:
+  el progreso se ve con `llm.status`.
+- `llm.cancel` — cancela la descarga en curso; el `.part` se conserva para reanudar.
+- `llm.mode` — cambia `LOCAL`↔`REMOTE`: `args: { "mode": "LOCAL" | "REMOTE" }`. El
+  modo nuevo se escribe en `<casa>/config.json` (junto con los demás campos de
+  configuración que vengan en `args`), el servidor local se detiene al pasar a
+  `REMOTE` y el runtime queda con la configuración nueva.
 
 ## 5. Convenciones hermanadas (de los repos vecinos)
 
@@ -252,11 +263,11 @@ desde el día 1, no se improvisa:
 
 | Hilo | Rol | Notas |
 |---|---|---|
-| **Principal** | Bucle de lectura de stdin: recibe una solicitud JSON, la despacha, escribe la respuesta a stdout. | Nunca bloquea en red ni en descargas: si la operación es larga, la delega. Único dueño del stdout de respuesta (evita respuestas interleaved). |
+| **Principal** | Bucle de lectura de stdin: recibe una solicitud JSON, la despacha, escribe la respuesta a stdout. | Nunca bloquea en red ni en descargas: si la operación es larga, la delega. Único dueño del stdout de respuesta (evita respuestas interleaved). Atiende **varias** solicitudes seguidas, una por objeto JSON, hasta el EOF (D45). |
 | **Inferencia** | Un hilo por operación larga `agent.step`: HTTP + streaming SSE contra el LLM. | Devuelve el resultado al principal mediante cola; el principal sigue atendiendo `llm.status`/`llm.cancel` mientras tanto. |
 | **Descarga** | Descarga del GGUF con reanudación, progreso, cancelación. | **Single-flight**: un solo job por archivo de destino (lock por ruta, ver §7); un `llm.cancel` lo detiene sin perder el `.part`. |
 | **Supervisor** | Health-check periódico de `llama-server` (poll `/health`), detección de crash, reinicio bajo demanda. | Marca estado atómico `servidorVivo`; los errores de crash generan excepción persistida (§9). |
-| **Pump de stderr** | Lee el stderr del proceso hijo en streaming (línea a línea, tail ~4 KB en buffer circular). | Imprescindible para adjuntar el `logTail` a los errores de arranque; sin él, el pipe se llena y el hijo bloquea. |
+| **Pump de stderr** | *(retirado, D43)* El `stdout` y el `stderr` del hijo van directo al archivo `<casa>/logs/llama-server.log`. | Sin tubería el hijo nunca se bloquea escribiendo; el `logTail` de los errores de arranque se lee del archivo (12 líneas / 4 KB). |
 
 ### Reglas de sincronización
 
@@ -272,10 +283,12 @@ desde el día 1, no se improvisa:
   FunshiEngineAI: jamás convertir una cancelación en un error fatal.
 - **Timeouts en doble capa**: timeout del cliente HTTP (connect) + timeout global de la
   operación completa (incluido el streaming), para que un LLM colgado no deje pasos zombi.
-- **Procesos hijo**: `llama-server` como proceso hijo con pipes; apagado **escalonado**
-  (terminar → espera corta → kill del árbol de procesos → espera → kill forzado). En
-  Windows matar el árbol (`taskkill /T /F` o equivalente), en POSIX equivalente; un hook de
-  cierre garantiza que no quede `llama-server` huérfano al morir Silvy.
+- **Procesos hijo**: `llama-server` como proceso hijo con la salida combinada (`stdout` y
+  `stderr`) dirigida al log de la casa, sin tubería y sin stdin heredado; apagado
+  **escalonado** (terminar → espera corta → kill del árbol de procesos → espera → kill
+  forzado). En Windows matar el árbol (`taskkill /T /F` o equivalente), en POSIX
+  equivalente; un hook de cierre garantiza que no quede `llama-server` huérfano al morir
+  Silvy.
 - **Sin pools genéricos**: el modelo es "hilo dedicado por rol" (son 4-5 hilos fijos).
   Si en el futuro hubo cola de inferencia con coalescing (§7), se diseña ahí.
 - **Estados tipados, no banderas sueltas**: `enum class EstadoLlm` (DESCARGANDO, LISTO,
@@ -367,7 +380,17 @@ ignoran, para que un archivo escrito por otra versión no rompa a Silvy.
   "timeoutMs": 180000,
   "connectTimeoutMs": 10000,
   "maxRetries": 2,
-  "retryBaseMs": 300
+  "retryBaseMs": 300,
+
+  "hfBaseUrl": "https://huggingface.co",
+  "hfRepo": "unsloth/Phi-4-mini-instruct-GGUF",
+  "hfFile": "Phi-4-mini-instruct-Q4_K_M.gguf",
+  "llamaServerPath": "llama-server",
+  "contextSize": 8192,
+  "gpuLayers": 0,
+  "serverPort": 8081,
+  "portScan": 20,
+  "loadTimeoutMs": 180000
 }
 ```
 
@@ -382,12 +405,23 @@ ignoran, para que un archivo escrito por otra versión no rompa a Silvy.
 | `connectTimeoutMs` | `10000` | Límite de conexión HTTP (1..600000). |
 | `maxRetries` | `2` | Reintentos sobre errores reintentables (0..10). |
 | `retryBaseMs` | `300` | Base del backoff exponencial: base, 2·base, 4·base… (0..60000). |
+| `hfBaseUrl` | `https://huggingface.co` | Base de descarga del GGUF; debe empezar con `http://` o `https://` (permite espejos). |
+| `hfRepo` | `unsloth/Phi-4-mini-instruct-GGUF` | Repositorio de HuggingFace con el GGUF (modo LOCAL). |
+| `hfFile` | `Phi-4-mini-instruct-Q4_K_M.gguf` | Archivo GGUF dentro del repositorio (modo LOCAL). |
+| `llamaServerPath` | `llama-server` | Ruta o nombre del ejecutable `llama-server`; si es un nombre suelto se busca en el `PATH` (modo LOCAL). |
+| `contextSize` | `8192` | Contexto pedido al servidor local (`-c`) (128..40960). |
+| `gpuLayers` | `0` | Capas de GPU delegadas al modelo (`-ngl`); 0 = solo CPU (0..999). |
+| `serverPort` | `8081` | Puerto preferido del servidor local; 0 = se busca uno libre desde el primero (0..65535). |
+| `portScan` | `20` | Cuántos puertos se prueban a partir del preferido (1..200). |
+| `loadTimeoutMs` | `180000` | Presupuesto de la carga del modelo en el servidor local (1..3600000). |
 
 `validar()` (fail-fast) reúne **todos** los problemas de una vez en un `ErrorConfig`
 (`NO_CONFIGURADO`). Un campo con forma inválida en el `config` del request es
 `SOLICITUD_INVALIDA` (protocolo) y en el archivo de la casa es `NO_CONFIGURADO`
-(configuración). El modo LOCAL no define requisitos propios: sus reglas (modelo y
-servidor) se incorporan con la descarga del GGUF y el arranque del servidor local.
+(configuración). El modo LOCAL **sí** tiene requisitos propios: se validan siempre
+los campos de la tabla (base de descarga, repositorio, archivo, ejecutable del
+servidor y sus límites) y `llm.mode` deja la configuración completa escrita en la
+casa al cambiar de modo.
 
 ## 9. Sistema de excepciones (D28, D29)
 
@@ -457,7 +491,9 @@ tiempo" y un fallo de red significa "no hubo ni una respuesta" (D41).
 
 Todo mensaje de error se redacta para quien lo reciba **ya pensando en la acción**:
 - Fallas de arranque del servidor incluyen el **tail del log** del hijo (últimas ~12 líneas
-  / 4 KB) y las opciones concretas (`llamaServerPath`, `buildFromSource`, PATH).
+  / 4 KB, leídas de `<casa>/logs/llama-server.log`) y las opciones concretas: la ruta de
+  `llamaServerPath` o el `PATH` donde debe estar el ejecutable (D42: Silvy no compila
+  `llama.cpp`).
 - Fallas de descarga indican bytes recibidos/total y que se reanudará desde el `.part`.
 - Errores de config listan todos los campos con problema y su rango esperado.
 
@@ -514,7 +550,7 @@ Ambos proyectos fueron analizados a fondo antes de diseñar Silvy. Qué se toma 
 | Escaneo de ~20 puertos + reserva anti-TOCTOU | SAI (`portPolicy.ts`, ticket B-11) y FunshiEngineAI | §7 |
 | Health-check `/health` (200/503), poll 300 ms, timeout de carga 180 s, crash → exit code + logTail | Ambos (`LocalServerManager.kt` / `LlamaCppServerManager.ts`) | §6, §7 |
 | Apagado escalonado + kill del árbol de procesos + hook de cierre | Ambos | §6, §7 |
-| Pump de stderr en hilo dedicado con tail acotado | FunshiEngineAI (`LlamaManager.runProcess`) | §6 |
+| Log del hijo en archivo (salida combinada) + tail acotado leído del archivo | FunshiEngineAI (`LlamaManager.runProcess`), adaptado (D43) | §6 |
 | Timeout ≠ cancelación (nunca convertir cancelación en error fatal) | Ambos | §6, §9.2 |
 | Registro de peticiones con estado terminal único + TTL (re-hidratar UI) | SAI (`chatRequestRegistry.ts`) | §7 |
 | Circuit breaker con EWMA + fallback local↔remoto | SAI (`circuitBreaker.ts`, `LlmOrchestrator.ts`) | §7 (diseñado, no MVP) |
@@ -539,10 +575,11 @@ Silvy/
 ├── config/
 │   └── system_prompt.md    # System prompt default (español) — D7/D20
 ├── src/
-│   ├── main.cpp            # Solo argv + lectura de la solicitud (stdin/--request-file)
-│   │                       #   y escritura de la respuesta a stdout. Sin lógica.
+│   ├── main.cpp            # Solo argv + lectura de la solicitud (stdin/--request-file,
+│   │                       #   varias seguidas por stdin) y escritura de la respuesta a
+│   │                       #   stdout. Sin lógica.
 │   ├── Comandos/           #   Un módulo por dominio de comando (agent.step,
-│   │                       #   errores.list, errores.get)
+│   │                       #   errores.list, errores.get, llm.status/download/cancel/mode)
 │   ├── Nucleo/             #   Protocolo: Solicitud/Respuesta, dispatch por enum,
 │   │                       #   catálogo de comandos
 │   ├── Errores/            #   Jerarquía ErrorSilvy + CodigoError, clasificadores
@@ -552,11 +589,15 @@ Silvy/
 │   │                       #   petición + stream SSE + tool-calling), GatewayOpenAi
 │   │                       #   (transporte HTTP, reintentos, cancelación) y
 │   │                       #   FabricaGateway (gateway según la configuración)
-│   ├── Modelo/             #   Descarga GGUF con reanudación + gestión de llama-server
-│   │                       #   (hilo supervisor + pump de stderr, §6)
+│   ├── Modelo/             #   Estado del LLM local, rutas de la casa, descarga GGUF
+│   │                       #   con reanudación + lock, proceso hijo y supervisor de
+│   │                       #   llama-server (log en archivo, D43) y el runtime local
+│   ├── Transporte/         #   Lector de solicitudes desde stdin (framing JSON) para
+│   │                       #   que el runtime sobreviva entre solicitudes (D45)
 │   ├── Concurrencia/       #   Primitivas: hilo dedicado con cancelación, cola de
 │   │                       #   resultados al principal, flag atómica (§6)
-│   └── Config/             #   Config propio de Silvy + validar() fail-fast (§8)
+│   └── Config/             #   Config propio de Silvy + ConfigLlm con validar()
+│   │                       #   fail-fast (§8) y carga/guardado de config.json
 ├── tests/                  #   Tests headless (CHECK + ctest), incluye el gateway
 │                           #   falso y el servidor HTTP falso (mock OpenAI)
 └── .agentes/               #   Memoria de trabajo (ignorada por git)
@@ -577,11 +618,16 @@ Reglas de arquitectura que sostienen la estructura (mismo patrón que la CLI):
 | **H0 — Diseño** | Este documento. | Usuario lo revisa y lo da por bueno. |
 | **H1 — Esqueleto** | Repo con CMake, `AGENTS.md`, tipos del protocolo, `main` stdin/stdout, jerarquía de excepciones + registro persistente (§9), hilos/colas básicas (§6), tests con **gateway falso**, `config/system_prompt.md`. | `cmake` + `ctest` en verde. Un request JSON de ejemplo produces una respuesta JSON determinista vía gateway falso; una excepción forzada queda en `errores.jsonl` y sale en la respuesta `ok:false`. |
 | **H2 — LLM remoto** | Cliente HTTP + SSE contra API compatible OpenAI, tool-calling real, clasificadores de error HTTP/red, retry con backoff. | Contra un mock HTTP local: `agent.step` devuelve toolCalls reales; timeout vs cancelación bien diferenciados; tests en verde. |
-| **H3 — LLM local** | Descarga del GGUF con reanudación + lock, arranque/supervisión de `llama-server` (health-check, crash→logTail, apagado escalonado), comandos `llm.status/download/mode`. | Modo LOCAL end-to-end con Phi-4-mini. Recarga tras crash. Descarga cancelable y reanudable. |
+| **H3 — LLM local** | Descarga del GGUF con reanudación + lock, arranque/supervisión de `llama-server` (health-check, crash→logTail, apagado escalonado), runtime local en el proceso, comandos `llm.status/download/cancel/mode`. | Modo LOCAL end-to-end con Phi-4-mini. Recarga tras crash. Descarga cancelable y reanudable. |
 | **H4 — Integración CLI** | Comandos `agent.step` + `llm.*` en FunshiEngineCLI, loop del agente en su núcleo, historial + recorte, catálogo de herramientas, aprobaciones (D12). | La CLI (por JSON) da un paso completo con aprobación simulada. |
 | **H5 — MVP** | Demo D22 con verificación D21: generar script C++ → `project.src.create` → `script.compile` → `diagnostics.list` → corregir hasta verde, con límite D14. | El script compilado sin diagnósticos en la CLI real. Validación del usuario. |
 | **H6 — Extensibilidad** | Skills (P5), system prompt editable desde la config de la CLI, herramientas configuradas por el usuario (RAG, MCP). | Un usuario configura una skill y una tool nueva sin tocar código de Silvy. |
 | **Futuro** | Streaming de tokens Silvy→CLI (D16), UI de la CLI, empaquetado con el instalador de 4 componentes. | — |
+
+Estado: **H1**, **H2** y **H3** implementados, con build y `ctest` en verde. H3 queda a
+la espera de la validación del usuario: el recorrido local completo (descarga real del
+GGUF de Phi-4-mini y arranque de `llama-server`) necesita el ejecutable, que Silvy no
+compila (D42).
 
 ## 13. Preguntas abiertas (a resolver en el hito indicado)
 

@@ -55,8 +55,8 @@ build/Silvy --request < solicitud.json
   `agent.step` sin red ni modelo.
 - **Servidor HTTP falso**: `tests/ServidorFalso.*` levanta un servidor local
   que habla como una API compatible OpenAI (respuestas guionizadas, SSE por
-  bloques, errores HTTP y demoras); es lo que prueba el gateway remoto sin
-  red ni modelo.
+  bloques, errores HTTP y demoras); además sirve archivos binarios con o sin
+  `Range`, para probar la descarga del GGUF sin red ni modelo.
 - **Código de salida 77 = *skipped*, no fallo**. La prueba que lanza el binario
   `Silvy` como subproceso lo busca junto a `silvy-tests`; si no está (p. ej.
   build parcial), se salta en lugar de fallar.
@@ -70,8 +70,8 @@ build/Silvy --request < solicitud.json
 ```
 src/
 ├── main.cpp                # Solo transporte: argv, lectura de la solicitud
-│                           #   (stdin/--request-file), escritura a stdout con
-│                           #   su exit code. Sin lógica.
+│                           #   (stdin con varias seguidas o --request-file),
+│                           #   escritura a stdout con su exit code. Sin lógica.
 ├── Nucleo/                 # Protocolo: Solicitud/Respuesta, catálogo de
 │                           #   comandos, dispatch (switch exhaustivo) y
 │                           #   captura única de errores en el borde.
@@ -83,8 +83,14 @@ src/
 │                           #   (cuerpo OpenAI + stream SSE + tool-calling),
 │                           #   GatewayOpenAi (transporte HTTP, reintentos,
 │                           #   cancelación) y FabricaGateway.
-├── Config/                 # Casa de Silvy, ajustes y prompt de sistema
-│                           #   (default en config/system_prompt.md).
+├── Modelo/                 # LLM local: estado, rutas de la casa, descarga del
+│                           #   GGUF (reanudable + lock), proceso hijo y
+│                           #   supervisor de llama-server, y el runtime local.
+├── Transporte/             # Lector de solicitudes desde stdin (framing JSON)
+│                           #   para que el runtime sobreviva entre solicitudes.
+├── Config/                 # Casa de Silvy, ajustes, configuración del LLM
+│                           #   (config.json) y prompt de sistema (default en
+│                           #   config/system_prompt.md).
 ├── Concurrencia/           # Hilo trabajador con cola (mutex/cv) y parada con
 │                           #   vaciado, para trabajos de fondo.
 └── Comandos/               # Un módulo por dominio de comando.
@@ -99,9 +105,21 @@ Reglas que sostienen esta arquitectura:
   código de salida) sin imprimir nada. Las escrituras a stdout son del
   transporte; si hubiera operaciones de fondo, responden por cola al principal.
 - **Stateless (1 request = 1 paso).** La CLI manda el historial completo y el
-  catálogo de herramientas; Silvy no guarda sesiones entre solicitudes.
+  catálogo de herramientas; Silvy no guarda sesiones entre solicitudes. El
+  runtime local conserva recursos (modelo, descarga, servidor), no
+  conversación.
+- **El LLM local es un runtime del proceso.** El modelo descargado, la descarga
+  en curso y `llama-server` sobreviven entre solicitudes: por eso `main`
+  atiende varias seguidas desde stdin y con `--request-file` solo una. El
+  runtime se inyecta en `DependenciasNucleo`; sin él (tests) los comandos
+  `llm.*` responden `NO_CONFIGURADO`.
 - **Silvy no ejecuta herramientas ni compila.** Pide tool calls y la CLI los
-  ejecuta; los compiladores de los proyectos son de la CLI, no de Silvy.
+  ejecuta; los compiladores de los proyectos son de la CLI, no de Silvy. Por
+  el mismo motivo Silvy no compila `llama.cpp`: el ejecutable `llama-server`
+  lo aporta el usuario, por `llamaServerPath` o por el `PATH`.
+- **El log del proceso hijo va a un archivo** (`<casa>/logs/llama-server.log`),
+  no a una tubería en memoria: el hijo nunca se bloquea escribiendo y el tail
+  que acompaña a los errores se lee del archivo.
 - **Comandos en catálogo.** Cada comando nuevo se agrega al `enum class`, al
   mapa de texto en `CatalogoComandos.cpp` y a su caso en el `switch` del
   dispatch. El switch es exhaustivo: el compilador avisa si falta un caso.
