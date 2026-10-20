@@ -20,9 +20,14 @@ FetchContent_Declare(nlohmann_json
 FetchContent_MakeAvailable(nlohmann_json)
 
 add_library(silvy_core STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Config/ConfigSilvy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Concurrencia/HiloTrabajador.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Errores/Errores.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Errores/RegistroErrores.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/CatalogoComandos.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/Protocolo.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/Respuesta.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/Solicitud.cpp
 )
 
 target_include_directories(silvy_core PUBLIC
@@ -40,6 +45,9 @@ add_executable(silvy-tests
 )
 target_link_libraries(silvy-tests PRIVATE silvy_core)
 target_compile_options(silvy-tests PRIVATE -Wall -Wextra)
+target_compile_definitions(silvy-tests PRIVATE
+    SILVY_DIR_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
+)
 add_test(NAME silvy-tests COMMAND silvy-tests)
 
 # En Windows con MinGW, las DLLs del runtime no llegan solas al directorio de

@@ -1,0 +1,36 @@
+{
+  "command": "agent.step",
+  "systemPrompt": "Sos un agente de prueba determinista.",
+  "messages": [
+    { "role": "system", "content": "El proyecto se llama Demo y vive en projects/Demo." },
+    { "role": "user", "content": "Creame un script que mueva la cámara." }
+  ],
+  "tools": [
+    {
+      "name": "script.compile",
+      "description": "Compila los scripts del proyecto y devuelve los diagnósticos.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "projectId": { "type": "string" }
+        },
+        "required": ["projectId"]
+      }
+    },
+    {
+      "name": "project.src.create",
+      "description": "Crea un archivo fuente dentro del proyecto.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "projectId": { "type": "string" },
+          "ruta": { "type": "string" },
+          "contenido": { "type": "string" }
+        },
+        "required": ["projectId", "ruta", "contenido"]
+      }
+    }
+  ],
+  "maxIterations": 3,
+  "id": "demo-1"
+}

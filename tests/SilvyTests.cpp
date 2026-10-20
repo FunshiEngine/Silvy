@@ -20,9 +20,14 @@
 // Patrón propio (este repo no tiene submódulo del motor): macro CHECK y
 // CarpetaPrueba RAII para temporales. Cierra con OK/FALLOS y exit 0/1.
 
+#include "Config/ConfigSilvy.h"
 #include "Concurrencia/HiloTrabajador.h"
 #include "Errores/Errores.h"
 #include "Errores/RegistroErrores.h"
+#include "Nucleo/CatalogoComandos.h"
+#include "Nucleo/Protocolo.h"
+#include "Nucleo/Respuesta.h"
+#include "Nucleo/Solicitud.h"
 
 #include <nlohmann/json.hpp>
 
@@ -31,6 +36,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -98,6 +104,19 @@ std::size_t contarArchivosRotados(const fs::path& directorio) {
         }
     }
     return cantidad;
+}
+
+// Ejecuta la acción y dice si lanzó un ErrorSilvy con el código indicado.
+bool lanzaConCodigo(const std::function<void()>& accion,
+                    silvy::CodigoError codigo) {
+    try {
+        accion();
+    } catch (const silvy::ErrorSilvy& error) {
+        return error.codigo() == codigo;
+    } catch (...) {
+        return false;
+    }
+    return false;
 }
 
 void probarErrores() {
@@ -292,6 +311,263 @@ void probarValidacionConfig() {
     CHECK(problemas.size() == 3, "validar lista todos los problemas juntos");
 }
 
+void probarProtocolo() {
+    CHECK(silvy::textoDeRol(silvy::RolMensaje::SISTEMA) == "system",
+          "rol system");
+    CHECK(silvy::textoDeRol(silvy::RolMensaje::USUARIO) == "user", "rol user");
+    CHECK(silvy::textoDeRol(silvy::RolMensaje::ASISTENTE) == "assistant",
+          "rol assistant");
+    CHECK(silvy::textoDeRol(silvy::RolMensaje::HERRAMIENTA) == "tool",
+          "rol tool");
+    CHECK(!silvy::rolDesdeTexto("otro").has_value(), "rol desconocido sin valor");
+
+    CHECK(silvy::textoDeRazonFin(silvy::RazonFin::DETENCION) == "stop",
+          "razon stop");
+    CHECK(silvy::textoDeRazonFin(silvy::RazonFin::LLAMADAS_HERRAMIENTA) ==
+              "tool_calls",
+          "razon tool_calls");
+    CHECK(silvy::razonFinDesdeTexto("stop") == silvy::RazonFin::DETENCION,
+          "leer razon stop");
+    CHECK(silvy::razonFinDesdeTexto("tool_calls") ==
+              silvy::RazonFin::LLAMADAS_HERRAMIENTA,
+          "leer razon tool_calls");
+    CHECK(silvy::razonFinDesdeTexto("cualquiera") ==
+              silvy::RazonFin::DESCONOCIDA,
+          "razon desconocida no rompe");
+
+    nlohmann::json llamadaJson;
+    llamadaJson["id"] = "call_1";
+    llamadaJson["name"] = "script.compile";
+    llamadaJson["arguments"] = {{"projectId", "Demo"}};
+
+    nlohmann::json mensajeJson;
+    mensajeJson["role"] = "assistant";
+    mensajeJson["content"] = "Voy a compilar.";
+    mensajeJson["toolCalls"] = nlohmann::json::array({llamadaJson});
+
+    const silvy::Mensaje mensaje = silvy::mensajeDesdeJson(mensajeJson);
+    CHECK(mensaje.rol == silvy::RolMensaje::ASISTENTE, "rol del mensaje");
+    CHECK(mensaje.contenido == "Voy a compilar.", "contenido del mensaje");
+    CHECK(mensaje.llamadas.size() == 1, "llamada del mensaje");
+    if (!mensaje.llamadas.empty()) {
+        CHECK(mensaje.llamadas[0].nombre == "script.compile",
+              "nombre de la llamada");
+        CHECK(mensaje.llamadas[0].argumentos["projectId"] == "Demo",
+              "argumentos de la llamada");
+    }
+    const auto mensajeVuelta = silvy::mensajeAJson(mensaje);
+    CHECK(mensajeVuelta["role"] == "assistant", "serializar rol");
+    CHECK(mensajeVuelta["toolCalls"][0]["name"] == "script.compile",
+          "serializar llamada");
+
+    nlohmann::json herramientaJson;
+    herramientaJson["name"] = "script.compile";
+    herramientaJson["description"] = "Compila los scripts.";
+    herramientaJson["parameters"] = {{"type", "object"}};
+    const silvy::Herramienta herramienta =
+        silvy::herramientaDesdeJson(herramientaJson);
+    CHECK(herramienta.nombre == "script.compile", "nombre de herramienta");
+    CHECK(herramienta.parametros["type"] == "object",
+          "parametros de herramienta");
+    CHECK(silvy::herramientaAJson(herramienta)["name"] == "script.compile",
+          "serializar herramienta");
+
+    CHECK(lanzaConCodigo(
+              [] {
+                  silvy::mensajeDesdeJson({{"role", "marciano"}});
+              },
+              silvy::CodigoError::SOLICITUD_INVALIDA),
+          "rol invalido da SOLICITUD_INVALIDA");
+    CHECK(lanzaConCodigo(
+              [] {
+                  silvy::mensajeDesdeJson(
+                      {{"role", "tool"}, {"content", "resultado"}});
+              },
+              silvy::CodigoError::SOLICITUD_INVALIDA),
+          "tool sin toolCallId da SOLICITUD_INVALIDA");
+    CHECK(lanzaConCodigo(
+              [] {
+                  silvy::mensajeDesdeJson(
+                      {{"role", "assistant"}, {"toolCalls", "no-array"}});
+              },
+              silvy::CodigoError::SOLICITUD_INVALIDA),
+          "toolCalls no array da SOLICITUD_INVALIDA");
+    CHECK(lanzaConCodigo(
+              [] {
+                  silvy::mensajeDesdeJson(
+                      {{"role", "assistant"},
+                       {"toolCalls",
+                        nlohmann::json::array(
+                            {{{"id", "c1"},
+                              {"name", "x"},
+                              {"arguments", "no-objeto"}}})}});
+              },
+              silvy::CodigoError::SOLICITUD_INVALIDA),
+          "arguments no objeto da SOLICITUD_INVALIDA");
+
+    // Los campos desconocidos se toleran (upgrades del protocolo).
+    const auto tolerante =
+        silvy::mensajeDesdeJson({{"role", "user"},
+                                 {"content", "hola"},
+                                 {"campoNuevo", true}});
+    CHECK(tolerante.contenido == "hola", "campos desconocidos se toleran");
+}
+
+void probarSolicitud() {
+    const auto minima = silvy::solicitudDesdeJson({{"command", "agent.step"}});
+    CHECK(minima.comando == "agent.step", "comando de la solicitud");
+    CHECK(minima.argumentos.is_object() && minima.argumentos.empty(),
+          "args vacío por defecto");
+    CHECK(minima.mensajes.empty(), "sin mensajes por defecto");
+    CHECK(minima.herramientas.empty(), "sin herramientas por defecto");
+    CHECK(minima.maxIteraciones == 3, "maxIterations por defecto");
+    CHECK(!minima.promptSistema.has_value(), "sin prompt por defecto");
+
+    const fs::path fixture =
+        fs::path(SILVY_DIR_FIXTURES) / "agente-step.json";
+    std::ifstream entrada(fixture, std::ios::binary);
+    CHECK(entrada.good(), "existe el request JSON de ejemplo");
+    if (entrada.good()) {
+        const auto jsonSolicitud = nlohmann::json::parse(entrada);
+        const auto solicitud = silvy::solicitudDesdeJson(jsonSolicitud);
+        CHECK(solicitud.comando == "agent.step", "comando del ejemplo");
+        CHECK(solicitud.mensajes.size() == 2, "mensajes del ejemplo");
+        CHECK(solicitud.herramientas.size() == 2, "herramientas del ejemplo");
+        CHECK(solicitud.maxIteraciones == 3, "maxIterations del ejemplo");
+        CHECK(solicitud.promptSistema.has_value(), "prompt del ejemplo");
+        CHECK(solicitud.id.has_value() && *solicitud.id == "demo-1",
+              "id del ejemplo");
+        if (solicitud.herramientas.size() == 2) {
+            CHECK(solicitud.herramientas[0].nombre == "script.compile",
+                  "primera herramienta del ejemplo");
+        }
+    }
+
+    CHECK(lanzaConCodigo(
+              [] {
+                  silvy::solicitudDesdeJson(nlohmann::json::array());
+              },
+              silvy::CodigoError::SOLICITUD_INVALIDA),
+          "solicitud no objeto da SOLICITUD_INVALIDA");
+    CHECK(lanzaConCodigo(
+              [] {
+                  silvy::solicitudDesdeJson({{"command", 5}});
+              },
+              silvy::CodigoError::SOLICITUD_INVALIDA),
+          "command no string da SOLICITUD_INVALIDA");
+    CHECK(lanzaConCodigo(
+              [] {
+                  silvy::solicitudDesdeJson(
+                      {{"command", "agent.step"}, {"maxIterations", 0}});
+              },
+              silvy::CodigoError::SOLICITUD_INVALIDA),
+          "maxIterations 0 da SOLICITUD_INVALIDA");
+    CHECK(lanzaConCodigo(
+              [] {
+                  silvy::solicitudDesdeJson(
+                      {{"command", "agent.step"}, {"messages", "no-array"}});
+              },
+              silvy::CodigoError::SOLICITUD_INVALIDA),
+          "messages no array da SOLICITUD_INVALIDA");
+}
+
+void probarRespuesta() {
+    const auto exito = silvy::ResultadoComando::exito(
+        {{"content", "hola"},
+         {"toolCalls", nlohmann::json::array()},
+         {"finishReason", "stop"}});
+    CHECK(exito.codigoSalida == silvy::codigosSalida::kExito,
+          "exito tiene codigo 0");
+    const auto jsonExito = exito.respuesta.aJson();
+    CHECK(jsonExito["apiVersion"] == silvy::kVersionApiSilvy,
+          "apiVersion en la respuesta");
+    CHECK(jsonExito["ok"] == true, "ok en la respuesta");
+    CHECK(jsonExito["error"].is_null(), "error null en exito");
+    CHECK(jsonExito["result"]["content"] == "hola", "result en exito");
+
+    const auto fallo = silvy::ResultadoComando::fallo(
+        {{"codigo", "SOLICITUD_INVALIDA"}, {"mensaje", "rota"}},
+        silvy::codigosSalida::kSolicitudInvalida);
+    CHECK(fallo.codigoSalida == silvy::codigosSalida::kSolicitudInvalida,
+          "fallo tiene codigo 2");
+    const auto jsonFallo = fallo.respuesta.aJson();
+    CHECK(jsonFallo["ok"] == false, "ok false en fallo");
+    CHECK(jsonFallo["error"]["codigo"] == "SOLICITUD_INVALIDA",
+          "error tipado en fallo");
+    CHECK(jsonFallo["result"].is_null(), "result null en fallo");
+
+    silvy::Respuesta conId = silvy::Respuesta::ok({{"x", 1}});
+    conId.id = 42;
+    CHECK(conId.aJson()["id"] == 42, "eco del id");
+
+    const std::string texto = conId.aTexto();
+    CHECK(texto.find('\n') == std::string::npos, "aTexto es una sola linea");
+    CHECK(nlohmann::json::parse(texto)["ok"] == true, "aTexto es JSON valido");
+}
+
+void probarCatalogo() {
+    for (const silvy::ComandoSilvy comando : silvy::todosLosComandos()) {
+        const auto vuelta = silvy::comandoDesdeTexto(
+            silvy::textoDeComando(comando));
+        CHECK(vuelta.has_value() && *vuelta == comando,
+              "comando y texto hacen roundtrip");
+    }
+    CHECK(silvy::textoDeComando(silvy::ComandoSilvy::PASO_AGENTE) ==
+              "agent.step",
+          "texto de agent.step");
+    CHECK(silvy::textoDeComando(silvy::ComandoSilvy::ERRORES_LIST) ==
+              "errores.list",
+          "texto de errores.list");
+    CHECK(!silvy::comandoDesdeTexto("nada").has_value(),
+          "comando desconocido sin valor");
+}
+
+void probarCasaYPrompt() {
+    const fs::path base = fs::temp_directory_path();
+    silvy::FuentesCasa fuentes;
+    fuentes.directorioBinario = base / "bin";
+    CHECK(silvy::resolverCasa(fuentes) == (base / "bin" / "silvy-home"),
+          "casa por defecto junto al binario");
+
+    fuentes.variableEntorno = (base / "desde-env").string();
+    CHECK(silvy::resolverCasa(fuentes) == (base / "desde-env"),
+          "SILVY_HOME pisa el default");
+
+    fuentes.argumento = base / "desde-arg";
+    CHECK(silvy::resolverCasa(fuentes) == (base / "desde-arg"),
+          "--home pisa a SILVY_HOME");
+
+    CarpetaPrueba casa("prompt");
+    const fs::path dirCasa = casa.ruta() / "casa";
+    const fs::path dirBin = casa.ruta() / "bin";
+    fs::create_directories(dirCasa);
+    fs::create_directories(dirBin / "config");
+    auto escribir = [](const fs::path& ruta, const std::string& contenido) {
+        std::ofstream salida(ruta, std::ios::binary);
+        salida << contenido;
+    };
+    escribir(dirCasa / "system_prompt.md", "prompt de casa");
+    escribir(dirBin / "config" / "system_prompt.md", "prompt empaquetado");
+
+    CHECK(silvy::cargarPromptSistema(std::nullopt, dirCasa, dirBin) ==
+              "prompt de casa",
+          "la casa gana al prompt empaquetado");
+    CHECK(silvy::cargarPromptSistema(std::string("override"), dirCasa,
+                                     dirBin) == "override",
+          "el override del request gana");
+    fs::remove(dirCasa / "system_prompt.md");
+    CHECK(silvy::cargarPromptSistema(std::nullopt, dirCasa, dirBin) ==
+              "prompt empaquetado",
+          "sin prompt de casa cae al empaquetado");
+    fs::remove(dirBin / "config" / "system_prompt.md");
+    CHECK(lanzaConCodigo(
+              [&] {
+                  silvy::cargarPromptSistema(std::nullopt, dirCasa, dirBin);
+              },
+              silvy::CodigoError::NO_CONFIGURADO),
+          "sin ninguna fuente el prompt da NO_CONFIGURADO");
+}
+
 }  // namespace
 
 int main() {
@@ -307,6 +583,16 @@ int main() {
     probarRegistroDegradado();
     std::cout << "== validacion de config ==\n";
     probarValidacionConfig();
+    std::cout << "== protocolo ==\n";
+    probarProtocolo();
+    std::cout << "== solicitud ==\n";
+    probarSolicitud();
+    std::cout << "== respuesta ==\n";
+    probarRespuesta();
+    std::cout << "== catalogo ==\n";
+    probarCatalogo();
+    std::cout << "== casa y prompt ==\n";
+    probarCasaYPrompt();
 
     std::cout << (fallos == 0 ? "OK" : "FALLOS") << ": " << total
               << " comprobaciones\n";
