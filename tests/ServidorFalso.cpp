@@ -21,7 +21,9 @@
 #include <httplib.h>
 
 #include <chrono>
+#include <cstdio>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -35,6 +37,7 @@ struct ServidorFalso::Impl final {
     std::thread hilo;
     std::deque<RespuestaFalsa> guion;
     std::vector<PeticionRecibida> peticiones;
+    std::map<std::string, ArchivoServido> archivos;
     std::mutex candado;
     int puerto = 0;
 };
@@ -50,7 +53,72 @@ void ServidorFalso::encolar(RespuestaFalsa respuesta) {
     impl_->guion.push_back(std::move(respuesta));
 }
 
+void ServidorFalso::servirArchivo(const std::string& ruta,
+                                   ArchivoServido archivo) {
+    std::lock_guard<std::mutex> guard(impl_->candado);
+    impl_->archivos[ruta] = std::move(archivo);
+}
+
 void ServidorFalso::arrancar() {
+    // Archivos binarios: atienden Range a mano (el servidor de httplib no
+    // recorta el cuerpo de un handler que ya trae el contenido).
+    impl_->servidor.Get(
+        "/.*", [this](const httplib::Request& peticion,
+                      httplib::Response& respuesta) {
+            ArchivoServido archivo;
+            bool encontrado = false;
+            const std::string rango = peticion.get_header_value("Range");
+            {
+                std::lock_guard<std::mutex> guard(impl_->candado);
+                const auto it = impl_->archivos.find(peticion.path);
+                if (it != impl_->archivos.end()) {
+                    archivo = it->second;
+                    encontrado = true;
+                }
+                PeticionRecibida registrada;
+                registrada.ruta = peticion.path;
+                registrada.cuerpo = peticion.body;
+                registrada.autorizacion =
+                    peticion.get_header_value("Authorization");
+                registrada.rango = rango;
+                impl_->peticiones.push_back(registrada);
+            }
+
+            if (!encontrado) {
+                respuesta.status = 404;
+                respuesta.set_content("no encontrado", "text/plain");
+                return;
+            }
+
+            const std::size_t total = archivo.contenido.size();
+            if (archivo.totalAnunciado > 0) {
+                // Se anuncia un total mayor que lo que se entrega: la
+                // descarga queda incompleta a propósito.
+                respuesta.status = 206;
+                respuesta.set_header(
+                    "Content-Range",
+                    "bytes 0-" + std::to_string(total == 0 ? 0 : total - 1) +
+                        "/" + std::to_string(archivo.totalAnunciado));
+                respuesta.set_content(archivo.contenido,
+                                      "application/octet-stream");
+                return;
+            }
+
+            if (!rango.empty() && archivo.soportaRange) {
+                // El cuerpo va entero: el servidor de httplib lo recorta
+                // según el Range y arma el Content-Range. Si el rango no es
+                // satisfacible, responde 416.
+                respuesta.status = 206;
+                respuesta.set_content(archivo.contenido,
+                                      "application/octet-stream");
+                return;
+            }
+
+            // Sin Range (o con un servidor que lo ignora): el archivo entero.
+            respuesta.status = 200;
+            respuesta.set_content(archivo.contenido, "application/octet-stream");
+        });
+
     impl_->servidor.Post("/v1/chat/completions",
                          [this](const httplib::Request& peticion,
                                 httplib::Response& respuesta) {

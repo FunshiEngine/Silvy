@@ -31,6 +31,7 @@
 #include "Llm/GatewayOpenAi.h"
 #include "Llm/PeticionLlm.h"
 #include "Llm/ProtocoloOpenAi.h"
+#include "Modelo/DescargaGguf.h"
 #include "Modelo/EstadoLlm.h"
 #include "Nucleo/CatalogoComandos.h"
 #include "Nucleo/DependenciasNucleo.h"
@@ -52,6 +53,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1825,6 +1827,13 @@ bool probarSubproceso(const char* argv0) {
 
 // --- LLM local ------------------------------------------------------------
 
+// Lee un archivo entero como texto.
+std::string leerArchivo(const fs::path& ruta) {
+    std::ifstream entrada(ruta, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(entrada)),
+                       std::istreambuf_iterator<char>());
+}
+
 void probarEstadoLlm() {
     CHECK(silvy::textoDeEstadoLlm(silvy::EstadoLlm::SIN_MODELO) == "SIN_MODELO",
           "estado sin modelo");
@@ -1852,6 +1861,187 @@ void probarEstadoLlm() {
           "un texto desconocido no es un estado");
     CHECK(!silvy::estadoLlmDesdeTexto("listo").has_value(),
           "el estado distingue mayusculas");
+}
+
+void probarDescargaGguf() {
+    std::string contenido;
+    for (int i = 0; i < 1000; ++i) {
+        contenido += "0123456789";
+    }
+    silvy::pruebas::ServidorFalso servidor;
+    servidor.servirArchivo("/modelo.gguf", {contenido, true, 0});
+    servidor.arrancar();
+    const std::string url = "http://127.0.0.1:" +
+                            std::to_string(servidor.puerto()) + "/modelo.gguf";
+
+    // Descarga desde cero.
+    {
+        CarpetaPrueba carpeta("descarga-cero");
+        silvy::OpcionesDescarga opciones;
+        opciones.url = url;
+        opciones.destino = carpeta.ruta() / "modelo.gguf";
+        opciones.parcial = carpeta.ruta() / "modelo.gguf.part";
+        opciones.lock = carpeta.ruta() / "modelo.gguf.lock";
+        std::atomic<bool> cancelado{false};
+        silvy::DescargadorGguf descargador(opciones);
+        const auto resultado = descargador.descargar(cancelado);
+        CHECK(resultado.bytes == contenido.size(), "se descargan todos los bytes");
+        CHECK(!resultado.reanudada, "la descarga no se reanuda");
+        CHECK(!resultado.yaEstaba, "el modelo no estaba descargado");
+        CHECK(fs::exists(opciones.destino), "el modelo queda en su sitio");
+        CHECK(!fs::exists(opciones.parcial), "el parcial desaparece");
+        CHECK(!fs::exists(opciones.lock), "el lock se libera");
+        CHECK(leerArchivo(opciones.destino) == contenido,
+              "el contenido descargado es el correcto");
+    }
+
+    // Reanudación: lo que quedó en el parcial se pide por Range.
+    {
+        CarpetaPrueba carpeta("descarga-reanudada");
+        const fs::path parcial = carpeta.ruta() / "modelo.gguf.part";
+        escribirArchivo(parcial, contenido.substr(0, 100));
+        silvy::OpcionesDescarga opciones;
+        opciones.url = url;
+        opciones.destino = carpeta.ruta() / "modelo.gguf";
+        opciones.parcial = parcial;
+        opciones.lock = carpeta.ruta() / "modelo.gguf.lock";
+        std::atomic<bool> cancelado{false};
+        silvy::DescargadorGguf descargador(opciones);
+        const auto resultado = descargador.descargar(cancelado);
+        CHECK(resultado.reanudada, "la descarga se reanuda desde el parcial");
+        CHECK(resultado.bytes == contenido.size(),
+              "los bytes son los del modelo completo");
+        CHECK(leerArchivo(opciones.destino) == contenido,
+              "el contenido reanudado es el correcto");
+        const auto& peticiones = servidor.peticiones();
+        CHECK(!peticiones.empty() && peticiones.back().rango == "bytes=100-",
+              "el servidor recibió el Range del parcial");
+    }
+
+    // El servidor ignora el Range: la descarga se rehace desde cero.
+    {
+        silvy::pruebas::ServidorFalso sinRango;
+        sinRango.servirArchivo("/modelo.gguf", {contenido, false, 0});
+        sinRango.arrancar();
+        const std::string urlSinRango =
+            "http://127.0.0.1:" + std::to_string(sinRango.puerto()) +
+            "/modelo.gguf";
+        CarpetaPrueba carpeta("descarga-sin-range");
+        const fs::path parcial = carpeta.ruta() / "modelo.gguf.part";
+        escribirArchivo(parcial, contenido.substr(0, 100));
+        silvy::OpcionesDescarga opciones;
+        opciones.url = urlSinRango;
+        opciones.destino = carpeta.ruta() / "modelo.gguf";
+        opciones.parcial = parcial;
+        opciones.lock = carpeta.ruta() / "modelo.gguf.lock";
+        std::atomic<bool> cancelado{false};
+        silvy::DescargadorGguf descargador(opciones);
+        const auto resultado = descargador.descargar(cancelado);
+        CHECK(!resultado.reanudada, "sin Range la descarga se rehace");
+        CHECK(resultado.bytes == contenido.size(),
+              "sin Range se descargan todos los bytes");
+        CHECK(leerArchivo(opciones.destino) == contenido,
+              "el contenido no se duplica");
+    }
+
+    // El parcial ya estaba completo: el servidor responde 416.
+    {
+        CarpetaPrueba carpeta("descarga-416");
+        const fs::path parcial = carpeta.ruta() / "modelo.gguf.part";
+        escribirArchivo(parcial, contenido);
+        silvy::OpcionesDescarga opciones;
+        opciones.url = url;
+        opciones.destino = carpeta.ruta() / "modelo.gguf";
+        opciones.parcial = parcial;
+        opciones.lock = carpeta.ruta() / "modelo.gguf.lock";
+        std::atomic<bool> cancelado{false};
+        silvy::DescargadorGguf descargador(opciones);
+        const auto resultado = descargador.descargar(cancelado);
+        CHECK(resultado.bytes == contenido.size(),
+              "el 416 da por completo el parcial");
+        CHECK(leerArchivo(opciones.destino) == contenido,
+              "el contenido final es el correcto");
+    }
+
+    // El servidor anuncia más de lo que entrega: la descarga falla.
+    {
+        silvy::pruebas::ServidorFalso mentiroso;
+        mentiroso.servirArchivo(
+            "/modelo.gguf", {contenido, true, contenido.size() * 2});
+        mentiroso.arrancar();
+        const std::string urlMentirosa =
+            "http://127.0.0.1:" + std::to_string(mentiroso.puerto()) +
+            "/modelo.gguf";
+        CarpetaPrueba carpeta("descarga-incompleta");
+        silvy::OpcionesDescarga opciones;
+        opciones.url = urlMentirosa;
+        opciones.destino = carpeta.ruta() / "modelo.gguf";
+        opciones.parcial = carpeta.ruta() / "modelo.gguf.part";
+        opciones.lock = carpeta.ruta() / "modelo.gguf.lock";
+        std::atomic<bool> cancelado{false};
+        silvy::DescargadorGguf descargador(opciones);
+        CHECK(lanzaConCodigo([&] { descargador.descargar(cancelado); },
+                              silvy::CodigoError::DESCARGA_FALLIDA),
+              "una descarga incompleta es DESCARGA_FALLIDA");
+        CHECK(!fs::exists(opciones.destino), "el modelo no se renombra");
+        CHECK(fs::exists(opciones.parcial), "el parcial se conserva");
+    }
+
+    // Idempotencia: el modelo ya está, no se descarga otra vez.
+    {
+        CarpetaPrueba carpeta("descarga-idempotente");
+        escribirArchivo(carpeta.ruta() / "modelo.gguf", contenido);
+        silvy::OpcionesDescarga opciones;
+        opciones.url = url;
+        opciones.destino = carpeta.ruta() / "modelo.gguf";
+        opciones.parcial = carpeta.ruta() / "modelo.gguf.part";
+        opciones.lock = carpeta.ruta() / "modelo.gguf.lock";
+        std::atomic<bool> cancelado{false};
+        silvy::DescargadorGguf descargador(opciones);
+        const auto resultado = descargador.descargar(cancelado);
+        CHECK(resultado.yaEstaba, "el modelo ya estaba descargado");
+    }
+
+    // Otro proceso tiene el lock: la descarga espera y se rinde.
+    {
+        CarpetaPrueba carpeta("descarga-lock");
+        escribirArchivo(carpeta.ruta() / "modelo.gguf.lock", "");
+        silvy::OpcionesDescarga opciones;
+        opciones.url = url;
+        opciones.destino = carpeta.ruta() / "modelo.gguf";
+        opciones.parcial = carpeta.ruta() / "modelo.gguf.part";
+        opciones.lock = carpeta.ruta() / "modelo.gguf.lock";
+        opciones.esperaLockMs = 300;
+        std::atomic<bool> cancelado{false};
+        silvy::DescargadorGguf descargador(opciones);
+        CHECK(lanzaConCodigo([&] { descargador.descargar(cancelado); },
+                              silvy::CodigoError::DESCARGA_FALLIDA),
+              "un lock ajeno bloquea la descarga");
+    }
+
+    // Un lock abandonado (viejo) no bloquea: se puede quitar.
+    {
+        CarpetaPrueba carpeta("descarga-lock-abandonado");
+        const fs::path lock = carpeta.ruta() / "modelo.gguf.lock";
+        escribirArchivo(lock, "");
+        fs::last_write_time(lock, fs::file_time_type::clock::now() -
+                                      std::chrono::minutes(45));
+        silvy::OpcionesDescarga opciones;
+        opciones.url = url;
+        opciones.destino = carpeta.ruta() / "modelo.gguf";
+        opciones.parcial = carpeta.ruta() / "modelo.gguf.part";
+        opciones.lock = lock;
+        std::atomic<bool> cancelado{false};
+        silvy::DescargadorGguf descargador(opciones);
+        bool fallo = false;
+        try {
+            descargador.descargar(cancelado);
+        } catch (const std::exception&) {
+            fallo = true;
+        }
+        CHECK(!fallo, "un lock abandonado no bloquea la descarga");
+        CHECK(fs::exists(opciones.destino), "la descarga se completa");
+    }
 }
 
 }  // namespace
@@ -1903,6 +2093,8 @@ int main(int argc, char** argv) {
     probarComandosDeErrores();
     std::cout << "== estado del llm local ==\n";
     probarEstadoLlm();
+    std::cout << "== descarga del gguf ==\n";
+    probarDescargaGguf();
     std::cout << "== subproceso ==\n";
     const bool subproceso = probarSubproceso(argc > 0 ? argv[0] : "");
 

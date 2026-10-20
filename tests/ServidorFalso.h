@@ -20,6 +20,7 @@
 #define SILVY_TESTS_SERVIDOR_FALSO_H
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -44,6 +45,18 @@ struct RespuestaFalsa final {
     std::string tipoContenido = "application/json";
 };
 
+// Archivo binario que el servidor falso entrega en una ruta.
+struct ArchivoServido final {
+    // Contenido completo del archivo.
+    std::string contenido;
+    // true si el servidor atiende Range (responde 206 con el tramo pedido).
+    // Si es false ignora el Range y devuelve el archivo entero (200).
+    bool soportaRange = true;
+    // Total que se anuncia en el Content-Range cuando es distinto del tamaño
+    // real: sirve para simular una descarga incompleta.
+    std::uint64_t totalAnunciado = 0;
+};
+
 // Servidor HTTP local que habla como una API compatible OpenAI. Cada
 // petición consume la siguiente respuesta guionizada.
 class ServidorFalso final {
@@ -53,6 +66,8 @@ public:
         std::string ruta;
         std::string cuerpo;
         std::string autorizacion;
+        // Cabecera Range de la petición (vacía si no vino).
+        std::string rango;
     };
 
     ServidorFalso();
@@ -63,6 +78,10 @@ public:
 
     // Encola una respuesta para la próxima petición.
     void encolar(RespuestaFalsa respuesta);
+
+    // Registra un archivo que se sirve con GET en la ruta indicada. El
+    // registro tiene que hacerse antes de arrancar().
+    void servirArchivo(const std::string& ruta, ArchivoServido archivo);
 
     // Arranca el servidor en un puerto libre de la máquina local.
     void arrancar();

@@ -44,6 +44,7 @@ add_library(silvy_core STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Llm/GatewayOpenAi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Llm/PeticionLlm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Llm/ProtocoloOpenAi.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Modelo/DescargaGguf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Modelo/EstadoLlm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Modelo/RutasLocales.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/CatalogoComandos.cpp
