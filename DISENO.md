@@ -350,6 +350,44 @@ Reglas concretas, más allá de las convenciones hermanadas de estilo (§5):
   progreso, últimas excepciones) es legible desde `llm.status`/`errores.list` — la
   observabilidad es parte del diseño, no un afterthought.
 
+### 8.1 Configuración del LLM
+
+La configuración vive en `<casa de Silvy>/config.json` (opcional: sin archivo rigen los
+defaults). El `config` del request pisa los campos presentes; los campos desconocidos se
+ignoran, para que un archivo escrito por otra versión no rompa a Silvy.
+
+```json
+{
+  "mode": "REMOTE",
+  "baseUrl": "https://api.openai.com/v1",
+  "apiKey": "sk-...",
+  "modelName": "phi-4-mini-instruct",
+  "temperature": 0.2,
+  "timeoutMs": 180000,
+  "connectTimeoutMs": 10000,
+  "maxRetries": 2,
+  "retryBaseMs": 300
+}
+```
+
+| Campo | Default | Regla |
+|---|---|---|
+| `mode` | `LOCAL` | `LOCAL` o `REMOTE`. |
+| `baseUrl` | — | Obligatoria en REMOTE; debe empezar con `http://` o `https://`. |
+| `apiKey` | — | Obligatoria en REMOTE salvo en destino local (`localhost`, `127.0.0.1`, `::1`). |
+| `modelName` | — | Obligatoria en REMOTE. |
+| `temperature` | `0.2` | Entre 0 y 2. |
+| `timeoutMs` | `180000` | Presupuesto total de la operación, incluido el streaming (1..3600000). |
+| `connectTimeoutMs` | `10000` | Límite de conexión HTTP (1..600000). |
+| `maxRetries` | `2` | Reintentos sobre errores reintentables (0..10). |
+| `retryBaseMs` | `300` | Base del backoff exponencial: base, 2·base, 4·base… (0..60000). |
+
+`validar()` (fail-fast) reúne **todos** los problemas de una vez en un `ErrorConfig`
+(`NO_CONFIGURADO`). Un campo con forma inválida en el `config` del request es
+`SOLICITUD_INVALIDA` (protocolo) y en el archivo de la casa es `NO_CONFIGURADO`
+(configuración). El modo LOCAL no define requisitos propios: sus reglas (modelo y
+servidor) se incorporan con la descarga del GGUF y el arranque del servidor local.
+
 ## 9. Sistema de excepciones (D28, D29)
 
 ### 9.1 Jerarquía
@@ -388,8 +426,22 @@ Punto único de entrada para errores ajenos (no controlados por nosotros):
 | Clasificador | Entrada | Sale como |
 |---|---|---|
 | `desdeHttp(status, cuerpo, esLocal)` | respuesta HTTP no-2xx | código mapeado por status; en el 400, *keyword-sniffing* (`context`, `kv cache`, `tokens`) para distinguir `CONTEXTO_AGOTADO`; snippet de ~300 chars del cuerpo en el mensaje |
-| `desdeRed(excepcion, esLocal)` | fallo de transporte | `SERVIDOR_CAIDO` (local) / `MODELO_NO_DISPONIBLE` (remoto), siempre reintentable |
+| `desdeRed(detalle, esLocal)` | fallo de transporte sin respuesta HTTP (conexión, DNS, TLS, corte de lectura) | `SERVIDOR_CAIDO` (local) / `MODELO_NO_DISPONIBLE` (remoto), siempre reintentable |
 | `envolver(excepcion)` | cualquier `std::exception` no identificada | `DESCONOCIDO` con causa; `std::timeout`→`TIMEOUT`, cancelación→`CANCELADO` |
+
+Mapeo concreto de estados HTTP a códigos:
+
+| Estado | Código | ¿Reintentable? |
+|---|---|---|
+| 400 con `context`/`kv cache`/`tokens` | `CONTEXTO_AGOTADO` | no |
+| 400 resto | `SOLICITUD_INVALIDA` | no |
+| 401, 403 | `CLAVE_INVALIDA` | no |
+| 404 | `MODELO_NO_DISPONIBLE` | no |
+| 408 | `TIMEOUT` | sí |
+| 429 | `SIN_CUOTA` | no |
+| 5xx | `SERVIDOR_CAIDO` | sí |
+| 4xx restantes | `SOLICITUD_INVALIDA` | no |
+| cualquier otro | `DESCONOCIDO` | no |
 
 Regla dura: **timeout ≠ cancelación**. `CANCELADO` nunca es reintentable ni debe mostrarse
 como fallo (la canceló el humano/UI).

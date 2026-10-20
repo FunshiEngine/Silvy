@@ -20,9 +20,11 @@
 // Patrón propio (este repo no tiene submódulo del motor): macro CHECK y
 // CarpetaPrueba RAII para temporales. Cierra con OK/FALLOS y exit 0/1.
 
+#include "Config/ConfigLlm.h"
 #include "Config/ConfigSilvy.h"
 #include "Concurrencia/HiloTrabajador.h"
 #include "Errores/Errores.h"
+#include "Errores/ErroresHttp.h"
 #include "Errores/RegistroErrores.h"
 #include "GatewayFalso.h"
 #include "Llm/PeticionLlm.h"
@@ -657,6 +659,239 @@ void probarCasaYPrompt() {
           "sin ninguna fuente el prompt da NO_CONFIGURADO");
 }
 
+void probarConfigLlm() {
+    silvy::ConfigLlm base;
+    CHECK(base.modo == silvy::ModoLlm::LOCAL, "modo por defecto LOCAL");
+    CHECK(base.temperatura == 0.2, "temperatura por defecto 0.2");
+    CHECK(base.maxReintentos == 2, "dos reintentos por defecto");
+    CHECK(base.esperaBaseMs == 300, "espera base por defecto 300 ms");
+    CHECK(silvy::textoDeModo(silvy::ModoLlm::REMOTE) == "REMOTE",
+          "texto del modo remoto");
+    CHECK(silvy::modoDesdeTexto("LOCAL") == silvy::ModoLlm::LOCAL,
+          "modo desde texto LOCAL");
+    CHECK(!silvy::modoDesdeTexto("local").has_value(),
+          "el modo distingue mayusculas");
+
+    bool valida = true;
+    try {
+        base.validar();
+    } catch (...) {
+        valida = false;
+    }
+    CHECK(valida, "la config por defecto valida");
+
+    // Modo remoto incompleto: el error lista TODOS los problemas.
+    silvy::ConfigLlm remoto;
+    remoto.modo = silvy::ModoLlm::REMOTE;
+    std::string mensaje;
+    try {
+        remoto.validar();
+    } catch (const silvy::ErrorSilvy& error) {
+        CHECK(error.codigo() == silvy::CodigoError::NO_CONFIGURADO,
+              "config incompleta es NO_CONFIGURADO");
+        CHECK(!error.reintentable(), "la config no se reintenta");
+        mensaje = error.what();
+    }
+    CHECK(mensaje.find("baseUrl") != std::string::npos,
+          "el remoto exige baseUrl");
+    CHECK(mensaje.find("modelName") != std::string::npos,
+          "el remoto exige modelName");
+
+    remoto.baseUrl = "https://api.example.com/v1";
+    remoto.modelName = "phi-4";
+    mensaje.clear();
+    try {
+        remoto.validar();
+    } catch (const silvy::ErrorSilvy& error) {
+        mensaje = error.what();
+    }
+    CHECK(mensaje.find("apiKey") != std::string::npos,
+          "el remoto exige apiKey");
+
+    remoto.baseUrl = "http://127.0.0.1:8080/v1";
+    remoto.apiKey.clear();
+    valida = true;
+    try {
+        remoto.validar();
+    } catch (...) {
+        valida = false;
+    }
+    CHECK(valida, "en localhost la apiKey es opcional");
+
+    remoto.baseUrl = "ftp://servidor/v1";
+    mensaje.clear();
+    try {
+        remoto.validar();
+    } catch (const silvy::ErrorSilvy& error) {
+        mensaje = error.what();
+    }
+    CHECK(mensaje.find("http://") != std::string::npos,
+          "el esquema de la base se valida");
+
+    // Rangos: todos los desvíos aparecen en el mismo error.
+    silvy::ConfigLlm fueraDeRango = remoto;
+    fueraDeRango.baseUrl = "http://127.0.0.1:8080/v1";
+    fueraDeRango.modelName = "phi-4";
+    fueraDeRango.temperatura = -1.0;
+    fueraDeRango.timeoutTotalMs = 0;
+    fueraDeRango.timeoutConexionMs = 0;
+    fueraDeRango.maxReintentos = 11;
+    fueraDeRango.esperaBaseMs = -1;
+    mensaje.clear();
+    try {
+        fueraDeRango.validar();
+    } catch (const silvy::ErrorSilvy& error) {
+        mensaje = error.what();
+    }
+    CHECK(mensaje.find("temperature") != std::string::npos,
+          "la temperatura se valida");
+    CHECK(mensaje.find("timeoutMs") != std::string::npos,
+          "el timeout total se valida");
+    CHECK(mensaje.find("connectTimeoutMs") != std::string::npos,
+          "el timeout de conexion se valida");
+    CHECK(mensaje.find("maxRetries") != std::string::npos,
+          "los reintentos se validan");
+    CHECK(mensaje.find("retryBaseMs") != std::string::npos,
+          "la espera base se valida");
+
+    // Override del request: pisa lo que viene y conserva el resto.
+    silvy::ConfigLlm conOverride = remoto;
+    conOverride.modelName = "base";
+    const auto efectiva = conOverride.conOverride(
+        {{"modelName", "nuevo"},
+         {"temperature", 0.7},
+         {"timeoutMs", 1500},
+         {"maxRetries", 1},
+         {"campoDesconocido", true}});
+    CHECK(efectiva.modelName == "nuevo", "el override pisa el modelo");
+    CHECK(efectiva.temperatura == 0.7, "el override pisa la temperatura");
+    CHECK(efectiva.timeoutTotalMs == 1500, "el override pisa el timeout");
+    CHECK(efectiva.maxReintentos == 1, "el override pisa los reintentos");
+    CHECK(efectiva.baseUrl == conOverride.baseUrl, "lo no pisado se conserva");
+    CHECK(efectiva.modo == silvy::ModoLlm::REMOTE, "el modo se conserva");
+    CHECK(lanzaConCodigo([&] { conOverride.conOverride({{"baseUrl", 5}}); },
+                          silvy::CodigoError::SOLICITUD_INVALIDA),
+          "un tipo incorrecto en el override es SOLICITUD_INVALIDA");
+    CHECK(lanzaConCodigo([&] { conOverride.conOverride({{"mode", "NUBE"}}); },
+                          silvy::CodigoError::SOLICITUD_INVALIDA),
+          "un modo desconocido en el override es SOLICITUD_INVALIDA");
+
+    CHECK(silvy::esDestinoLocal("http://localhost:8080/v1"),
+          "localhost es local");
+    CHECK(silvy::esDestinoLocal("http://127.0.0.1:8080/v1"),
+          "127.0.0.1 es local");
+    CHECK(silvy::esDestinoLocal("http://[::1]:8080/v1"), "::1 es local");
+    CHECK(!silvy::esDestinoLocal("https://api.openai.com/v1"),
+          "un proveedor no es local");
+    CHECK(!silvy::esDestinoLocal("https://localhost.evil.com/v1"),
+          "localhost.evil.com no es local");
+    CHECK(!silvy::esDestinoLocal(""), "una base vacia no es local");
+
+    // Archivo de configuración de la casa.
+    CarpetaPrueba carpeta("config-llm");
+    const fs::path casa = carpeta.ruta();
+    const auto sinArchivo = silvy::cargarConfigLlm(casa);
+    CHECK(sinArchivo.modo == silvy::ModoLlm::LOCAL,
+          "sin archivo de configuracion hay defaults");
+    CHECK(sinArchivo.maxReintentos == 2, "los defaults se conservan");
+
+    escribirArchivo(
+        casa / "config.json",
+        R"({"mode":"REMOTE","baseUrl":"http://127.0.0.1:9999/v1","modelName":"phi-4","timeoutMs":1234})");
+    const auto cargada = silvy::cargarConfigLlm(casa);
+    CHECK(cargada.modo == silvy::ModoLlm::REMOTE, "el archivo fija el modo");
+    CHECK(cargada.baseUrl == "http://127.0.0.1:9999/v1",
+          "el archivo fija la base");
+    CHECK(cargada.modelName == "phi-4", "el archivo fija el modelo");
+    CHECK(cargada.timeoutTotalMs == 1234, "el archivo fija el timeout");
+    CHECK(cargada.maxReintentos == 2, "lo ausente conserva el default");
+
+    escribirArchivo(casa / "config.json", "{esto no es json");
+    CHECK(lanzaConCodigo([&] { silvy::cargarConfigLlm(casa); },
+                          silvy::CodigoError::NO_CONFIGURADO),
+          "un json malformado es NO_CONFIGURADO");
+
+    escribirArchivo(casa / "config.json",
+                    R"({"mode":"REMOTE","timeoutMs":"pronto"})");
+    CHECK(lanzaConCodigo([&] { silvy::cargarConfigLlm(casa); },
+                          silvy::CodigoError::NO_CONFIGURADO),
+          "un tipo incorrecto en el archivo es NO_CONFIGURADO");
+
+    escribirArchivo(casa / "config.json", "[1,2,3]");
+    CHECK(lanzaConCodigo([&] { silvy::cargarConfigLlm(casa); },
+                          silvy::CodigoError::NO_CONFIGURADO),
+          "un arreglo no es una configuracion");
+}
+
+void probarErroresHttp() {
+    const auto contexto = silvy::desdeHttp(
+        400, R"({"error":{"message":"maximum context length exceeded"}})",
+        false);
+    CHECK(contexto.codigo() == silvy::CodigoError::CONTEXTO_AGOTADO,
+          "el 400 de contexto se distingue por el cuerpo");
+    CHECK(!contexto.reintentable(), "el contexto agotado no se reintenta");
+    CHECK(std::string(contexto.what()).find("HTTP 400") != std::string::npos,
+          "el mensaje trae el estado");
+
+    const auto rechazo = silvy::desdeHttp(400, "bad request", false);
+    CHECK(rechazo.codigo() == silvy::CodigoError::SOLICITUD_INVALIDA,
+          "el 400 genérico es solicitud invalida");
+
+    const auto clave = silvy::desdeHttp(401, "invalid api key", false);
+    CHECK(clave.codigo() == silvy::CodigoError::CLAVE_INVALIDA,
+          "el 401 es clave invalida");
+    CHECK(!clave.reintentable(), "la clave invalida no se reintenta");
+
+    const auto prohibido = silvy::desdeHttp(403, "forbidden", false);
+    CHECK(prohibido.codigo() == silvy::CodigoError::CLAVE_INVALIDA,
+          "el 403 es clave invalida");
+
+    const auto modelo = silvy::desdeHttp(404, "no such model", false);
+    CHECK(modelo.codigo() == silvy::CodigoError::MODELO_NO_DISPONIBLE,
+          "el 404 es modelo no disponible");
+    CHECK(!modelo.reintentable(), "el modelo no disponible no se reintenta");
+
+    const auto tiempo = silvy::desdeHttp(408, "request timeout", false);
+    CHECK(tiempo.codigo() == silvy::CodigoError::TIMEOUT,
+          "el 408 es timeout");
+    CHECK(tiempo.reintentable(), "el timeout se reintenta");
+
+    const auto cuota = silvy::desdeHttp(429, "rate limit", false);
+    CHECK(cuota.codigo() == silvy::CodigoError::SIN_CUOTA, "el 429 es cuota");
+    CHECK(!cuota.reintentable(), "la cuota no se reintenta");
+
+    const auto caido = silvy::desdeHttp(503, "service unavailable", false);
+    CHECK(caido.codigo() == silvy::CodigoError::SERVIDOR_CAIDO,
+          "el 503 es servidor caido");
+    CHECK(caido.reintentable(), "el servidor caido se reintenta");
+
+    const auto teapot = silvy::desdeHttp(418, "teapot", false);
+    CHECK(teapot.codigo() == silvy::CodigoError::SOLICITUD_INVALIDA,
+          "un 4xx raro es solicitud invalida");
+
+    const auto raro = silvy::desdeHttp(302, "redireccion", false);
+    CHECK(raro.codigo() == silvy::CodigoError::DESCONOCIDO,
+          "un estado fuera de rango es desconocido");
+    CHECK(!raro.reintentable(), "lo desconocido no se reintenta");
+
+    const auto largo = silvy::desdeHttp(500, std::string(400, 'x'), false);
+    CHECK(std::string(largo.what()).size() < 380,
+          "el fragmento del cuerpo queda acotado");
+
+    const auto redRemota = silvy::desdeRed("conexion rechazada", false);
+    CHECK(redRemota.codigo() == silvy::CodigoError::MODELO_NO_DISPONIBLE,
+          "la red remota es modelo no disponible");
+    CHECK(redRemota.reintentable(), "la red remota se reintenta");
+
+    const auto redLocal = silvy::desdeRed("conexion rechazada", true);
+    CHECK(redLocal.codigo() == silvy::CodigoError::SERVIDOR_CAIDO,
+          "la red local es servidor caido");
+    CHECK(redLocal.reintentable(), "la red local se reintenta");
+    CHECK(std::string(redLocal.what()).find("llama-server") !=
+              std::string::npos,
+          "el mensaje nombra al servidor local");
+}
+
 void probarPasoAgente() {
     EntornoNucleo entorno("paso-agente");
     escribirArchivo(entorno.casa / "system_prompt.md", "prompt de casa");
@@ -1138,6 +1373,10 @@ int main(int argc, char** argv) {
     probarCatalogo();
     std::cout << "== casa y prompt ==\n";
     probarCasaYPrompt();
+    std::cout << "== config llm ==\n";
+    probarConfigLlm();
+    std::cout << "== errores http ==\n";
+    probarErroresHttp();
     std::cout << "== paso agente ==\n";
     probarPasoAgente();
     std::cout << "== prompt de casa ==\n";

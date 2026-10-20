@@ -22,9 +22,11 @@ FetchContent_MakeAvailable(nlohmann_json)
 add_library(silvy_core STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Comandos/ErroresComandos.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Comandos/PasoAgente.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Config/ConfigLlm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Config/ConfigSilvy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Concurrencia/HiloTrabajador.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Errores/Errores.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Errores/ErroresHttp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Errores/RegistroErrores.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Llm/PeticionLlm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/CatalogoComandos.cpp
