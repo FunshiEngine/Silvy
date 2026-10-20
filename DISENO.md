@@ -164,9 +164,16 @@ valores de texto en español. **Borrador a refinar en H1** (§12).
       "parameters": { "type": "object", "properties": { … }, "required": [ … ] }
     }
   ],
-  "maxIterations": 3                // límite de auto-corrección (D14) — referencia para la CLI
+  "maxIterations": 3,               // límite de auto-corrección (D14) — referencia para la CLI
+  "id": "paso-1"                    // opcional: eco en la respuesta
 }
 ```
+
+`args` es el objeto de argumentos de los comandos de control (`errores.list`,
+`errores.get`); `agent.step` no lo usa. El prompt de sistema efectivo (override
+del request, `<casa>/system_prompt.md` o `config/system_prompt.md` junto al
+binario) encabeza la conversación; los mensajes `system` del historial viajan
+detrás como contexto de la CLI.
 
 ### 4.2 Response
 
@@ -181,7 +188,8 @@ valores de texto en español. **Borrador a refinar en H1** (§12).
       { "id": "call_abc", "name": "script.compile", "arguments": { … } }
     ],
     "finishReason": "tool_calls"    // stop | tool_calls | length | …
-  }
+  },
+  "id": "paso-1"                    // opcional: eco de la solicitud
 }
 ```
 
@@ -193,6 +201,12 @@ historial como mensaje `tool`.
 
 Además de `agent.step`, la CLI puede invocar:
 
+- `errores.list` — últimos errores persistidos: `args` admite `limite` (50 por
+  defecto) y `codigo` (filtro por `CodigoError`); devuelve
+  `{ "errores": [ … ] }`, más reciente primero.
+- `errores.get` — detalle por id: `args: { "id": "…" }`; devuelve
+  `{ "encontrado": true|false, "registro": { … } | null }` (un id inexistente
+  no es un fallo).
 - `llm.status` — modo, modelo, si `llama-server` está vivo, progreso de descarga.
 - `llm.download` — inicia/reanuda la descarga del GGUF.
 - `llm.mode` — cambia LOCAL↔REMOTO.
@@ -394,7 +408,7 @@ falle**:
   excepción por línea JSON) más un `errores-<fecha>.jsonl` por rotación.
 - **Qué se guarda** (objeto por excepción):
   ```jsonc
-  { "ts": "2026-10-18T12:34:56.789Z", "codigo": "SERVIDOR_CAIDO",
+  { "id": "err-…", "ts": "2026-10-18T12:34:56.789Z", "codigo": "SERVIDOR_CAIDO",
     "mensaje": "…", "reintentable": true,
     "comando": "agent.step", "modo": "LOCAL", "modelo": "phi-4-mini",
     "detalle": { "exitCode": 1, "logTail": "…" },

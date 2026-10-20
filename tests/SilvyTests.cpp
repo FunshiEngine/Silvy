@@ -24,7 +24,11 @@
 #include "Concurrencia/HiloTrabajador.h"
 #include "Errores/Errores.h"
 #include "Errores/RegistroErrores.h"
+#include "GatewayFalso.h"
+#include "Llm/PeticionLlm.h"
 #include "Nucleo/CatalogoComandos.h"
+#include "Nucleo/DependenciasNucleo.h"
+#include "Nucleo/NucleoSilvy.h"
 #include "Nucleo/Protocolo.h"
 #include "Nucleo/Respuesta.h"
 #include "Nucleo/Solicitud.h"
@@ -38,6 +42,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -118,6 +123,56 @@ bool lanzaConCodigo(const std::function<void()>& accion,
     }
     return false;
 }
+
+void escribirArchivo(const fs::path& ruta, const std::string& contenido) {
+    std::ofstream salida(ruta, std::ios::binary);
+    salida << contenido;
+}
+
+nlohmann::json cargarFixture(const std::string& nombre) {
+    std::ifstream entrada(fs::path(SILVY_DIR_FIXTURES) / nombre,
+                          std::ios::binary);
+    if (!entrada) {
+        return nullptr;
+    }
+    return nlohmann::json::parse(entrada);
+}
+
+silvy::ConfigRegistroErrores configuracionDe(const fs::path& casa) {
+    silvy::ConfigRegistroErrores config;
+    config.directorio = casa / "errores";
+    return config;
+}
+
+// Entorno de núcleo con casa temporal, binario simulado y registro aislado.
+struct EntornoNucleo final {
+    explicit EntornoNucleo(const std::string& nombre)
+        : carpeta(nombre),
+          casa(carpeta.ruta() / "home"),
+          bin(carpeta.ruta() / "bin"),
+          registro(configuracionDe(casa)) {
+        fs::create_directories(casa);
+        fs::create_directories(bin / "config");
+    }
+
+    CarpetaPrueba carpeta;
+    fs::path casa;
+    fs::path bin;
+    silvy::RegistroErrores registro;
+};
+
+std::vector<std::string> lineasDeErrores(const EntornoNucleo& entorno) {
+    return leerLineas(entorno.casa / "errores" / "errores.jsonl");
+}
+
+// Gateway que lanza una excepción ajena al dominio para probar la
+// normalización del borde.
+class GatewayQueRompe final : public silvy::LlmGateway {
+public:
+    silvy::RespuestaLlm paso(const silvy::PeticionLlm&) override {
+        throw std::runtime_error("socket roto");
+    }
+};
 
 void probarErrores() {
     for (const silvy::CodigoError codigo : silvy::todosLosCodigos()) {
@@ -423,12 +478,9 @@ void probarSolicitud() {
     CHECK(minima.maxIteraciones == 3, "maxIterations por defecto");
     CHECK(!minima.promptSistema.has_value(), "sin prompt por defecto");
 
-    const fs::path fixture =
-        fs::path(SILVY_DIR_FIXTURES) / "agente-step.json";
-    std::ifstream entrada(fixture, std::ios::binary);
-    CHECK(entrada.good(), "existe el request JSON de ejemplo");
-    if (entrada.good()) {
-        const auto jsonSolicitud = nlohmann::json::parse(entrada);
+    const auto jsonSolicitud = cargarFixture("agente-step.json");
+    CHECK(jsonSolicitud.is_object(), "existe el request JSON de ejemplo");
+    if (jsonSolicitud.is_object()) {
         const auto solicitud = silvy::solicitudDesdeJson(jsonSolicitud);
         CHECK(solicitud.comando == "agent.step", "comando del ejemplo");
         CHECK(solicitud.mensajes.size() == 2, "mensajes del ejemplo");
@@ -542,12 +594,9 @@ void probarCasaYPrompt() {
     const fs::path dirBin = casa.ruta() / "bin";
     fs::create_directories(dirCasa);
     fs::create_directories(dirBin / "config");
-    auto escribir = [](const fs::path& ruta, const std::string& contenido) {
-        std::ofstream salida(ruta, std::ios::binary);
-        salida << contenido;
-    };
-    escribir(dirCasa / "system_prompt.md", "prompt de casa");
-    escribir(dirBin / "config" / "system_prompt.md", "prompt empaquetado");
+    escribirArchivo(dirCasa / "system_prompt.md", "prompt de casa");
+    escribirArchivo(dirBin / "config" / "system_prompt.md",
+                    "prompt empaquetado");
 
     CHECK(silvy::cargarPromptSistema(std::nullopt, dirCasa, dirBin) ==
               "prompt de casa",
@@ -566,6 +615,345 @@ void probarCasaYPrompt() {
               },
               silvy::CodigoError::NO_CONFIGURADO),
           "sin ninguna fuente el prompt da NO_CONFIGURADO");
+}
+
+void probarPasoAgente() {
+    EntornoNucleo entorno("paso-agente");
+    escribirArchivo(entorno.casa / "system_prompt.md", "prompt de casa");
+
+    silvy::RespuestaLlm turno;
+    turno.contenido = "Voy a crear el script.";
+    silvy::LlamadaHerramienta llamada;
+    llamada.id = "call_1";
+    llamada.nombre = "project.src.create";
+    llamada.argumentos = {{"projectId", "Demo"},
+                          {"ruta", "scripts/camara.funshi"}};
+    turno.llamadas.push_back(llamada);
+    turno.razonFin = silvy::RazonFin::LLAMADAS_HERRAMIENTA;
+
+    silvy::pruebas::GatewayFalso gateway({turno});
+    silvy::DependenciasNucleo dependencias{&gateway, entorno.registro,
+                                           entorno.casa, entorno.bin};
+
+    const auto solicitud = cargarFixture("agente-step.json");
+    CHECK(solicitud.is_object(), "el fixture del paso existe");
+    const auto resultado =
+        silvy::ejecutarSolicitudJson(solicitud, dependencias);
+    const auto respuesta = resultado.respuesta.aJson();
+
+    CHECK(resultado.codigoSalida == silvy::codigosSalida::kExito,
+          "agent.step responde exito");
+    CHECK(respuesta["ok"] == true, "agent.step ok");
+    CHECK(respuesta["error"].is_null(), "sin error en el paso");
+    CHECK(respuesta["result"]["content"] == "Voy a crear el script.",
+          "contenido del turno");
+    CHECK(respuesta["result"]["toolCalls"].size() == 1,
+          "un toolCall en la respuesta");
+    CHECK(respuesta["result"]["toolCalls"][0]["name"] ==
+              "project.src.create",
+          "nombre del toolCall");
+    CHECK(respuesta["result"]["toolCalls"][0]["arguments"]["projectId"] ==
+              "Demo",
+          "argumentos del toolCall");
+    CHECK(respuesta["result"]["finishReason"] == "tool_calls",
+          "razon de fin");
+    CHECK(respuesta["id"] == "demo-1", "id ecoado en el exito");
+
+    CHECK(gateway.peticiones().size() == 1, "el gateway recibio un paso");
+    const auto& peticion = gateway.peticiones()[0];
+    CHECK(peticion.mensajes.size() == 3, "prompt de sistema + historial");
+    CHECK(peticion.mensajes[0].rol == silvy::RolMensaje::SISTEMA,
+          "system primero");
+    CHECK(peticion.mensajes[0].contenido ==
+              "Sos un agente de prueba determinista.",
+          "el override del request gana");
+    CHECK(peticion.mensajes[1].rol == silvy::RolMensaje::SISTEMA,
+          "el system de la CLI viaja como contexto");
+    CHECK(peticion.mensajes[2].rol == silvy::RolMensaje::USUARIO,
+          "el historial conserva el orden");
+    CHECK(peticion.herramientas.size() == 2,
+          "catalogo de herramientas completo");
+
+    entorno.registro.vaciar();
+    CHECK(lineasDeErrores(entorno).empty(),
+          "un paso exitoso no persiste errores");
+}
+
+void probarPromptDeCasa() {
+    EntornoNucleo entorno("prompt-casa");
+    escribirArchivo(entorno.casa / "system_prompt.md", "prompt de casa");
+
+    silvy::RespuestaLlm turno;
+    turno.contenido = "Hola.";
+    turno.razonFin = silvy::RazonFin::DETENCION;
+    silvy::pruebas::GatewayFalso gateway({turno});
+    silvy::DependenciasNucleo dependencias{&gateway, entorno.registro,
+                                           entorno.casa, entorno.bin};
+
+    const auto resultado = silvy::ejecutarSolicitudJson(
+        {{"command", "agent.step"},
+         {"messages",
+          nlohmann::json::array(
+              {{{"role", "user"}, {"content", "hola"}}})}},
+        dependencias);
+    const auto respuesta = resultado.respuesta.aJson();
+
+    CHECK(resultado.codigoSalida == silvy::codigosSalida::kExito,
+          "paso sin override exitoso");
+    CHECK(respuesta["result"]["content"] == "Hola.",
+          "contenido sin toolCalls");
+    CHECK(respuesta["result"]["toolCalls"].is_array() &&
+              respuesta["result"]["toolCalls"].empty(),
+          "toolCalls vacio");
+    CHECK(respuesta["result"]["finishReason"] == "stop",
+          "finishReason stop");
+    CHECK(!respuesta.contains("id"), "sin id si el request no lo trae");
+
+    CHECK(gateway.peticiones().size() == 1, "el gateway recibio el paso");
+    CHECK(gateway.peticiones()[0].mensajes[0].contenido == "prompt de casa",
+          "el prompt de casa se usa sin override");
+    CHECK(gateway.peticiones()[0].mensajes.size() == 2,
+          "prompt + un mensaje");
+}
+
+void probarErroresDelPaso() {
+    EntornoNucleo entorno("paso-errores");
+
+    // Sin prompt de sistema: falla antes de tocar el gateway.
+    silvy::pruebas::GatewayFalso sinUso({});
+    silvy::DependenciasNucleo dependencias{&sinUso, entorno.registro,
+                                           entorno.casa, entorno.bin};
+    const auto sinPrompt = silvy::ejecutarSolicitudJson(
+        {{"command", "agent.step"}, {"messages", nlohmann::json::array()}},
+        dependencias);
+    const auto respuestaSinPrompt = sinPrompt.respuesta.aJson();
+    CHECK(sinPrompt.codigoSalida == silvy::codigosSalida::kFalloGeneral,
+          "sin prompt sale 1");
+    CHECK(respuestaSinPrompt["ok"] == false, "sin prompt ok false");
+    CHECK(respuestaSinPrompt["error"]["codigo"] == "NO_CONFIGURADO",
+          "sin prompt NO_CONFIGURADO");
+    CHECK(respuestaSinPrompt["error"]["reintentable"] == false,
+          "config no es reintentable");
+    CHECK(sinUso.peticiones().empty(), "sin prompt no llega al gateway");
+
+    entorno.registro.vaciar();
+    auto lineas = lineasDeErrores(entorno);
+    CHECK(lineas.size() == 1, "el error de config se persiste");
+    if (!lineas.empty()) {
+        CHECK(nlohmann::json::parse(lineas.back()) ==
+                  respuestaSinPrompt["error"],
+              "la respuesta es exactamente el registro guardado");
+    }
+
+    // El gateway falla con un error tipado.
+    escribirArchivo(entorno.casa / "system_prompt.md", "prompt de casa");
+    silvy::pruebas::GatewayFalso caido =
+        silvy::pruebas::GatewayFalso::queFalla(silvy::ErrorTimeout(
+            "el servidor no respondio"));
+    silvy::DependenciasNucleo dependenciasCaido{&caido, entorno.registro,
+                                                entorno.casa, entorno.bin};
+    const auto conTimeout = silvy::ejecutarSolicitudJson(
+        {{"command", "agent.step"},
+         {"config", {{"mode", "REMOTE"}, {"modelName", "phi-4-mini"}}},
+         {"messages",
+          nlohmann::json::array(
+              {{{"role", "user"}, {"content", "hola"}}})},
+         {"id", "paso-2"}},
+        dependenciasCaido);
+    const auto respuestaTimeout = conTimeout.respuesta.aJson();
+    CHECK(conTimeout.codigoSalida == silvy::codigosSalida::kFalloGeneral,
+          "timeout sale 1");
+    CHECK(respuestaTimeout["error"]["codigo"] == "TIMEOUT",
+          "timeout tipado");
+    CHECK(respuestaTimeout["error"]["reintentable"] == true,
+          "timeout es reintentable");
+    CHECK(respuestaTimeout["id"] == "paso-2", "el id viaja en el error");
+
+    entorno.registro.vaciar();
+    lineas = lineasDeErrores(entorno);
+    CHECK(lineas.size() == 2, "el timeout se persiste");
+    if (!lineas.empty()) {
+        const auto guardado = nlohmann::json::parse(lineas.back());
+        CHECK(guardado == respuestaTimeout["error"],
+              "el timeout guardado es el de la respuesta");
+        CHECK(guardado["comando"] == "agent.step",
+              "contexto del comando");
+        CHECK(guardado["modo"] == "REMOTE", "contexto del modo");
+        CHECK(guardado["modelo"] == "phi-4-mini", "contexto del modelo");
+    }
+
+    // Una excepción ajena se normaliza a DESCONOCIDO con causa.
+    GatewayQueRompe roto;
+    silvy::DependenciasNucleo dependenciasRoto{&roto, entorno.registro,
+                                               entorno.casa, entorno.bin};
+    const auto conCrudo = silvy::ejecutarSolicitudJson(
+        {{"command", "agent.step"},
+         {"messages",
+          nlohmann::json::array(
+              {{{"role", "user"}, {"content", "hola"}}})}},
+        dependenciasRoto);
+    const auto respuestaCruda = conCrudo.respuesta.aJson();
+    CHECK(conCrudo.codigoSalida == silvy::codigosSalida::kFalloGeneral,
+          "excepcion cruda sale 1");
+    CHECK(respuestaCruda["error"]["codigo"] == "DESCONOCIDO",
+          "excepcion cruda normalizada");
+    CHECK(respuestaCruda["error"]["causa"]["mensaje"] == "socket roto",
+          "causa de la excepcion cruda");
+}
+
+void probarSinGateway() {
+    EntornoNucleo entorno("sin-gateway");
+    escribirArchivo(entorno.casa / "system_prompt.md", "prompt de casa");
+
+    silvy::DependenciasNucleo dependencias{nullptr, entorno.registro,
+                                           entorno.casa, entorno.bin};
+    const auto resultado = silvy::ejecutarSolicitudJson(
+        {{"command", "agent.step"}, {"messages", nlohmann::json::array()}},
+        dependencias);
+    const auto respuesta = resultado.respuesta.aJson();
+    CHECK(resultado.codigoSalida == silvy::codigosSalida::kFalloGeneral,
+          "sin gateway sale 1");
+    CHECK(respuesta["error"]["codigo"] == "NO_CONFIGURADO",
+          "sin gateway NO_CONFIGURADO");
+    CHECK(respuesta["error"]["mensaje"]
+              .get<std::string>()
+              .find("gateway") != std::string::npos,
+          "el mensaje menciona el gateway");
+}
+
+void probarSolicitudInvalidaEnNucleo() {
+    EntornoNucleo entorno("nucleo-invalido");
+    silvy::pruebas::GatewayFalso gateway({});
+    silvy::DependenciasNucleo dependencias{&gateway, entorno.registro,
+                                           entorno.casa, entorno.bin};
+
+    const auto desconocido = silvy::ejecutarSolicitudJson(
+        {{"command", "volar"}, {"id", 7}}, dependencias);
+    const auto respuesta = desconocido.respuesta.aJson();
+    CHECK(desconocido.codigoSalida ==
+              silvy::codigosSalida::kSolicitudInvalida,
+          "comando desconocido sale 2");
+    CHECK(respuesta["error"]["codigo"] == "SOLICITUD_INVALIDA",
+          "comando desconocido tipado");
+    CHECK(respuesta["id"] == 7, "el id se ecoa en el error");
+
+    entorno.registro.vaciar();
+    const auto lineas = lineasDeErrores(entorno);
+    CHECK(lineas.size() == 1, "el comando desconocido se persiste");
+    if (!lineas.empty()) {
+        CHECK(nlohmann::json::parse(lineas.back())["comando"] == "volar",
+              "el comando intentado queda guardado");
+    }
+
+    const auto raizInvalida =
+        silvy::ejecutarSolicitudJson(nlohmann::json::array(), dependencias);
+    CHECK(raizInvalida.codigoSalida ==
+              silvy::codigosSalida::kSolicitudInvalida,
+          "raiz no objeto sale 2");
+    CHECK(raizInvalida.respuesta.aJson()["error"]["codigo"] ==
+              "SOLICITUD_INVALIDA",
+          "raiz no objeto tipada");
+
+    const auto sinComando = silvy::ejecutarSolicitudJson(
+        {{"args", nlohmann::json::object()}}, dependencias);
+    CHECK(sinComando.codigoSalida ==
+              silvy::codigosSalida::kSolicitudInvalida,
+          "sin command sale 2");
+}
+
+void probarComandosDeErrores() {
+    EntornoNucleo entorno("comandos-errores");
+    escribirArchivo(entorno.casa / "system_prompt.md", "prompt de casa");
+    silvy::pruebas::GatewayFalso caido =
+        silvy::pruebas::GatewayFalso::queFalla(silvy::ErrorTimeout("tarde"));
+    silvy::DependenciasNucleo dependencias{&caido, entorno.registro,
+                                           entorno.casa, entorno.bin};
+
+    const auto paso = silvy::ejecutarSolicitudJson(
+        {{"command", "agent.step"},
+         {"messages",
+          nlohmann::json::array(
+              {{{"role", "user"}, {"content", "hola"}}})}},
+        dependencias);
+    const std::string idTimeout =
+        paso.respuesta.aJson()["error"]["id"].get<std::string>();
+
+    silvy::ejecutarSolicitudJson({{"command", "volar"}}, dependencias);
+
+    const auto lista =
+        silvy::ejecutarSolicitudJson({{"command", "errores.list"}},
+                                     dependencias);
+    const auto respuestaLista = lista.respuesta.aJson();
+    CHECK(lista.codigoSalida == silvy::codigosSalida::kExito,
+          "errores.list sale 0");
+    CHECK(respuestaLista["result"]["errores"].size() == 2,
+          "errores.list devuelve los dos");
+    CHECK(respuestaLista["result"]["errores"][0]["codigo"] ==
+              "SOLICITUD_INVALIDA",
+          "errores.list va de mas nuevo a mas viejo");
+    CHECK(respuestaLista["result"]["errores"][1]["codigo"] == "TIMEOUT",
+          "el segundo es el timeout");
+
+    const auto filtrada = silvy::ejecutarSolicitudJson(
+        {{"command", "errores.list"},
+         {"args", {{"codigo", "TIMEOUT"}}}},
+        dependencias);
+    CHECK(filtrada.respuesta.aJson()["result"]["errores"].size() == 1,
+          "filtro por codigo");
+    CHECK(filtrada.respuesta.aJson()["result"]["errores"][0]["codigo"] ==
+              "TIMEOUT",
+          "el filtro deja el correcto");
+
+    const auto limitada = silvy::ejecutarSolicitudJson(
+        {{"command", "errores.list"}, {"args", {{"limite", 1}}}},
+        dependencias);
+    CHECK(limitada.respuesta.aJson()["result"]["errores"].size() == 1,
+          "limite de la lista");
+    CHECK(limitada.respuesta.aJson()["result"]["errores"][0]["codigo"] ==
+              "SOLICITUD_INVALIDA",
+          "el limite deja el mas nuevo");
+
+    const auto porId = silvy::ejecutarSolicitudJson(
+        {{"command", "errores.get"}, {"args", {{"id", idTimeout}}}},
+        dependencias);
+    const auto respuestaId = porId.respuesta.aJson();
+    CHECK(porId.codigoSalida == silvy::codigosSalida::kExito,
+          "errores.get sale 0");
+    CHECK(respuestaId["result"]["encontrado"] == true,
+          "errores.get encuentra");
+    CHECK(respuestaId["result"]["registro"]["id"] == idTimeout,
+          "errores.get devuelve el registro");
+    CHECK(respuestaId["result"]["registro"] ==
+              paso.respuesta.aJson()["error"],
+          "el detalle coincide con la respuesta original");
+
+    const auto ausente = silvy::ejecutarSolicitudJson(
+        {{"command", "errores.get"},
+         {"args", {{"id", "err-no-existe"}}}},
+        dependencias);
+    const auto respuestaAusente = ausente.respuesta.aJson();
+    CHECK(ausente.codigoSalida == silvy::codigosSalida::kExito,
+          "errores.get inexistente sale 0");
+    CHECK(respuestaAusente["result"]["encontrado"] == false,
+          "errores.get inexistente no encuentra");
+    CHECK(respuestaAusente["result"]["registro"].is_null(),
+          "registro null si no existe");
+
+    const auto sinId = silvy::ejecutarSolicitudJson(
+        {{"command", "errores.get"}}, dependencias);
+    CHECK(sinId.codigoSalida == silvy::codigosSalida::kSolicitudInvalida,
+          "errores.get sin id sale 2");
+    CHECK(sinId.respuesta.aJson()["error"]["codigo"] ==
+              "SOLICITUD_INVALIDA",
+          "errores.get sin id tipado");
+
+    const auto codigoInvalido = silvy::ejecutarSolicitudJson(
+        {{"command", "errores.list"},
+         {"args", {{"codigo", "NO_EXISTE"}}}},
+        dependencias);
+    CHECK(codigoInvalido.codigoSalida ==
+              silvy::codigosSalida::kSolicitudInvalida,
+          "codigo desconocido sale 2");
 }
 
 }  // namespace
@@ -593,6 +981,18 @@ int main() {
     probarCatalogo();
     std::cout << "== casa y prompt ==\n";
     probarCasaYPrompt();
+    std::cout << "== paso agente ==\n";
+    probarPasoAgente();
+    std::cout << "== prompt de casa ==\n";
+    probarPromptDeCasa();
+    std::cout << "== errores del paso ==\n";
+    probarErroresDelPaso();
+    std::cout << "== sin gateway ==\n";
+    probarSinGateway();
+    std::cout << "== solicitud invalida en nucleo ==\n";
+    probarSolicitudInvalidaEnNucleo();
+    std::cout << "== comandos de errores ==\n";
+    probarComandosDeErrores();
 
     std::cout << (fallos == 0 ? "OK" : "FALLOS") << ": " << total
               << " comprobaciones\n";

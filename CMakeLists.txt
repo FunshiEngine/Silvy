@@ -20,11 +20,15 @@ FetchContent_Declare(nlohmann_json
 FetchContent_MakeAvailable(nlohmann_json)
 
 add_library(silvy_core STATIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Comandos/ErroresComandos.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Comandos/PasoAgente.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Config/ConfigSilvy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Concurrencia/HiloTrabajador.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Errores/Errores.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Errores/RegistroErrores.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Llm/PeticionLlm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/CatalogoComandos.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/NucleoSilvy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/Protocolo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/Respuesta.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/Solicitud.cpp
@@ -41,9 +45,13 @@ target_compile_options(silvy_core PRIVATE -Wall -Wextra)
 enable_testing()
 
 add_executable(silvy-tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/GatewayFalso.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/SilvyTests.cpp
 )
 target_link_libraries(silvy-tests PRIVATE silvy_core)
+target_include_directories(silvy-tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
+)
 target_compile_options(silvy-tests PRIVATE -Wall -Wextra)
 target_compile_definitions(silvy-tests PRIVATE
     SILVY_DIR_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
