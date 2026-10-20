@@ -33,6 +33,8 @@
 #include "Llm/ProtocoloOpenAi.h"
 #include "Modelo/DescargaGguf.h"
 #include "Modelo/EstadoLlm.h"
+#include "Modelo/RutasLocales.h"
+#include "Modelo/SupervisorLlama.h"
 #include "Nucleo/CatalogoComandos.h"
 #include "Nucleo/DependenciasNucleo.h"
 #include "Nucleo/NucleoSilvy.h"
@@ -54,6 +56,7 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1863,6 +1866,96 @@ void probarEstadoLlm() {
           "el estado distingue mayusculas");
 }
 
+void probarAyudasLocales() {
+    // URL de descarga.
+    CHECK(silvy::urlDeHuggingFace("unsloth/Phi-4-mini-instruct-GGUF",
+                                  "Phi-4-mini-instruct-Q4_K_M.gguf") ==
+              "https://huggingface.co/unsloth/Phi-4-mini-instruct-GGUF/"
+              "resolve/main/Phi-4-mini-instruct-Q4_K_M.gguf",
+          "la URL se arma con el repo y el archivo");
+    CHECK(silvy::urlDeHuggingFace("repo", "archivo", "http://espejo.local/") ==
+              "http://espejo.local/repo/resolve/main/archivo",
+          "la URL acepta un espejo propio");
+
+    // Cabeceras de rango y totales.
+    CHECK(silvy::cabeceraRange(0) == "bytes=0-", "el Range arranca en cero");
+    CHECK(silvy::cabeceraRange(1024) == "bytes=1024-",
+          "el Range lleva el desplazamiento");
+    CHECK(silvy::totalDesdeContentRange("bytes 0-99/1234") == 1234,
+          "el total sale del Content-Range");
+    CHECK(silvy::totalDesdeContentRange("bytes 0-99/*") == 0,
+          "un total desconocido es cero");
+    CHECK(silvy::totalDesdeContentRange("nada") == 0,
+          "un Content-Range inválido es cero");
+    CHECK(silvy::totalDesdeContentLength("1234") == 1234,
+          "el total sale del Content-Length");
+    CHECK(silvy::totalDesdeContentLength("") == 0,
+          "un Content-Length vacío es cero");
+
+    // Rutas de la casa.
+    const fs::path casa = fs::path("casa") / "de" / "prueba";
+    CHECK(silvy::rutas::directorioModelos(casa) == casa / "modelos",
+          "los modelos viven en su carpeta");
+    CHECK(silvy::rutas::modelo(casa, "m.gguf") == casa / "modelos" / "m.gguf",
+          "el modelo tiene su ruta");
+    CHECK(silvy::rutas::modeloParcial(casa, "m.gguf") ==
+              casa / "modelos" / "m.gguf.part",
+          "el parcial tiene su ruta");
+    CHECK(silvy::rutas::lockDescarga(casa, "m.gguf") ==
+              casa / "modelos" / "m.gguf.lock",
+          "el lock tiene su ruta");
+    CHECK(silvy::rutas::logServidor(casa) == casa / "logs" / "llama-server.log",
+          "el log del servidor tiene su ruta");
+
+    // Argumentos de llama-server.
+    silvy::OpcionesServidorLocal opciones;
+    opciones.rutaEjecutable = "llama-server";
+    opciones.modelo = "modelos/m.gguf";
+    opciones.puerto = 8081;
+    opciones.contextSize = 4096;
+    opciones.gpuLayers = 0;
+    const std::vector<std::string> argumentos =
+        silvy::argumentosLlamaServer(opciones);
+    CHECK(argumentos.size() == 12, "el servidor se lanza con 12 argumentos");
+    if (argumentos.size() == 12) {
+        CHECK(argumentos[0] == "llama-server", "el primer argumento es el binario");
+        CHECK(argumentos[1] == "-m" && argumentos[2] == "modelos/m.gguf",
+              "el modelo se pasa con -m");
+        CHECK(argumentos[3] == "--host" && argumentos[4] == "127.0.0.1",
+              "el servidor escucha en loopback");
+        CHECK(argumentos[5] == "--port" && argumentos[6] == "8081",
+              "el puerto se pasa con --port");
+        CHECK(argumentos[7] == "-c" && argumentos[8] == "4096",
+              "el contexto se pasa con -c");
+        CHECK(argumentos[9] == "-ngl" && argumentos[10] == "0",
+              "las capas de GPU se pasan con -ngl");
+        CHECK(argumentos[11] == "--jinja", "el servidor usa el chat de jinja");
+    }
+
+    // Porcentaje de carga que aparece en el log.
+    CHECK(silvy::porcentajeDeCarga("modelo cargado 45.2%").value_or(-1) == 45,
+          "el porcentaje sale del log");
+    CHECK(silvy::porcentajeDeCarga("12% 34% 90%").value_or(-1) == 90,
+          "el porcentaje más alto es el de la carga");
+    CHECK(!silvy::porcentajeDeCarga("sin porcentaje").has_value(),
+          "sin porcentaje no hay valor");
+
+    // Puerto libre.
+    const std::optional<int> puerto = silvy::buscarPuertoLibre(45000, 20);
+    CHECK(puerto.has_value(), "hay un puerto libre");
+    if (puerto) {
+        CHECK(*puerto >= 45000 && *puerto < 45020, "el puerto está en el rango");
+    }
+    CHECK(!silvy::buscarPuertoLibre(70000, 20).has_value(),
+          "un rango fuera de puertos no da ninguno");
+
+    // Ejecutable de llama-server.
+    CHECK(!silvy::resolverEjecutableLlama("no-existe-este-binario").has_value(),
+          "un nombre que no está en el PATH no se resuelve");
+    CHECK(silvy::resolverEjecutableLlama("carpeta/que/no/existe").has_value(),
+          "una ruta explícita se devuelve para nombrar el error");
+}
+
 void probarDescargaGguf() {
     std::string contenido;
     for (int i = 0; i < 1000; ++i) {
@@ -2093,6 +2186,8 @@ int main(int argc, char** argv) {
     probarComandosDeErrores();
     std::cout << "== estado del llm local ==\n";
     probarEstadoLlm();
+    std::cout << "== ayudas del llm local ==\n";
+    probarAyudasLocales();
     std::cout << "== descarga del gguf ==\n";
     probarDescargaGguf();
     std::cout << "== subproceso ==\n";
