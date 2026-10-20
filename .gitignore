@@ -1,0 +1,32 @@
+# Directorios de build
+build/
+build-*/
+out/
+
+# Artefactos de compilación
+*.obj
+*.o
+*.a
+*.lib
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Artefactos de CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+
+# IDE
+.vscode/
+.idea/
+*.user
+
+# Casa de Silvy (datos de runtime: config, modelo, errores, logs)
+silvy-home/
+
+# Memoria de trabajo de agentes (no versionada)
+.agentes/
