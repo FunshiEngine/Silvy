@@ -33,6 +33,7 @@ FetchContent_MakeAvailable(cpp_httplib)
 
 add_library(silvy_core STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Comandos/ErroresComandos.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Comandos/LlmComandos.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Comandos/PasoAgente.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Config/ConfigLlm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Config/ConfigSilvy.cpp
@@ -48,12 +49,14 @@ add_library(silvy_core STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Modelo/EstadoLlm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Modelo/ProcesoHijo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Modelo/RutasLocales.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Modelo/RuntimeLlm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Modelo/SupervisorLlama.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/CatalogoComandos.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/NucleoSilvy.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/Protocolo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/Respuesta.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/Nucleo/Solicitud.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/Transporte/LectorSolicitudes.cpp
 )
 
 target_include_directories(silvy_core PUBLIC

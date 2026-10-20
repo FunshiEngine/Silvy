@@ -19,12 +19,19 @@
 // Transporte del binario: parsea argv, elige la fuente de la solicitud (stdin
 // o archivo), delega el parseo/despacho en el núcleo y escribe la respuesta a
 // stdout con su código de salida. Ninguna lógica de comandos vive aquí.
+//
+// Desde stdin se atienden varias solicitudes seguidas (una por objeto JSON)
+// hasta el final del flujo: el runtime del LLM local (descarga y servidor)
+// vive en el proceso, así que tiene que sobrevivir entre solicitudes. Con
+// --request-file se atiende una sola solicitud y se termina.
 #include "Config/ConfigLlm.h"
 #include "Config/ConfigSilvy.h"
 #include "Errores/RegistroErrores.h"
+#include "Modelo/RuntimeLlm.h"
 #include "Nucleo/DependenciasNucleo.h"
 #include "Nucleo/NucleoSilvy.h"
 #include "Nucleo/Respuesta.h"
+#include "Transporte/LectorSolicitudes.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -51,8 +58,9 @@ std::string textoAyuda() {
         "  Silvy --request-file <ruta> [--home <ruta>]\n"
         "\n"
         "Opciones:\n"
-        "  --request         Lee la solicitud JSON de stdin.\n"
-        "  --request-file    Lee la solicitud JSON de un archivo.\n"
+        "  --request         Lee solicitudes JSON de stdin, una por objeto\n"
+        "                    JSON, hasta el final del flujo.\n"
+        "  --request-file    Lee una sola solicitud JSON de un archivo.\n"
         "  --home            Casa de Silvy (config, modelo, errores y logs).\n"
         "                    Precedencia: --home > SILVY_HOME > junto al binario.\n"
         "  --help, -h        Muestra esta ayuda.\n"
@@ -190,10 +198,39 @@ int main(int argc, char* argv[]) {
         return resultado.codigoSalida;
     }
 
+    // El runtime del LLM local vive en el proceso: el trabajo en segundo
+    // plano (descarga del modelo) y el servidor local tienen que sobrevivir
+    // entre solicitudes.
+    silvy::RuntimeLlm runtime(casa, dependencias.configLlm);
+    dependencias.runtime = &runtime;
+
     std::string textoSolicitud;
     if (argumentos.leerStdin) {
-        textoSolicitud = leerTodo(std::cin);
-    } else {
+        silvy::LectorSolicitudes lector(std::cin);
+        int codigoSalida = 0;
+        while (true) {
+            std::optional<std::string> solicitud;
+            try {
+                solicitud = lector.siguiente();
+            } catch (const std::exception& error) {
+                const silvy::ResultadoComando resultado =
+                    silvy::reportarErrorDeTransporte(
+                        silvy::envolver(error).what(), dependencias);
+                imprimir(resultado);
+                return resultado.codigoSalida;
+            }
+            if (!solicitud) {
+                break;
+            }
+            const silvy::ResultadoComando resultado =
+                silvy::ejecutarSolicitudTexto(*solicitud, dependencias);
+            imprimir(resultado);
+            codigoSalida = resultado.codigoSalida;
+        }
+        return codigoSalida;
+    }
+
+    {
         std::ifstream entrada(*argumentos.archivoSolicitud, std::ios::binary);
         if (!entrada) {
             const silvy::ResultadoComando resultado =

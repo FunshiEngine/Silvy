@@ -22,6 +22,7 @@
 #include "Config/ConfigLlm.h"
 #include "Errores/RegistroErrores.h"
 #include "Llm/LlmGateway.h"
+#include "Modelo/RuntimeLlm.h"
 
 #include <filesystem>
 #include <utility>
@@ -39,16 +40,21 @@ struct DependenciasNucleo final {
     // Configuración del LLM de la casa (config.json), sin el override del
     // request: esa se aplica al resolver cada paso.
     ConfigLlm configLlm;
+    // Runtime del LLM local (modelo, descarga y servidor). Puede faltar:
+    // solo el binario lo crea, porque un trabajo en segundo plano tiene que
+    // sobrevivir entre solicitudes.
+    RuntimeLlm* runtime = nullptr;
 
     DependenciasNucleo(LlmGateway* gateway, RegistroErrores& registro,
                        std::filesystem::path casa,
                        std::filesystem::path directorioBinario,
-                       ConfigLlm configLlm = {})
+                       ConfigLlm configLlm = {}, RuntimeLlm* runtime = nullptr)
         : gateway(gateway),
           registro(registro),
           casa(std::move(casa)),
           directorioBinario(std::move(directorioBinario)),
-          configLlm(std::move(configLlm)) {}
+          configLlm(std::move(configLlm)),
+          runtime(runtime) {}
 };
 
 }  // namespace silvy

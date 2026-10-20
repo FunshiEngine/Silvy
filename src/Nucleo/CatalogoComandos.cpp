@@ -30,6 +30,14 @@ std::string textoDeComando(ComandoSilvy comando) {
             return "errores.list";
         case ComandoSilvy::ERRORES_GET:
             return "errores.get";
+        case ComandoSilvy::LLM_STATUS:
+            return "llm.status";
+        case ComandoSilvy::LLM_DOWNLOAD:
+            return "llm.download";
+        case ComandoSilvy::LLM_CANCEL:
+            return "llm.cancel";
+        case ComandoSilvy::LLM_MODE:
+            return "llm.mode";
     }
     throw std::logic_error("Comando sin texto de protocolo");
 }
@@ -44,8 +52,10 @@ std::optional<ComandoSilvy> comandoDesdeTexto(const std::string& texto) {
 }
 
 std::vector<ComandoSilvy> todosLosComandos() {
-    return {ComandoSilvy::PASO_AGENTE, ComandoSilvy::ERRORES_LIST,
-            ComandoSilvy::ERRORES_GET};
+    return {ComandoSilvy::PASO_AGENTE,  ComandoSilvy::ERRORES_LIST,
+            ComandoSilvy::ERRORES_GET,   ComandoSilvy::LLM_STATUS,
+            ComandoSilvy::LLM_DOWNLOAD,  ComandoSilvy::LLM_CANCEL,
+            ComandoSilvy::LLM_MODE};
 }
 
 }  // namespace silvy

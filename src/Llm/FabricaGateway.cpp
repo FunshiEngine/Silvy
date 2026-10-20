@@ -19,21 +19,37 @@
 #include "Llm/FabricaGateway.h"
 
 #include "Llm/GatewayOpenAi.h"
+#include "Modelo/RuntimeLlm.h"
 
 #include <memory>
+#include <string>
 
 namespace silvy {
 
-std::unique_ptr<LlmGateway> crearGateway(const ConfigLlm& config) {
+std::unique_ptr<LlmGateway> crearGateway(const ConfigLlm& config,
+                                          RuntimeLlm* runtime) {
     config.validar();
 
     switch (config.modo) {
         case ModoLlm::REMOTE:
             return std::make_unique<GatewayOpenAi>(config);
-        case ModoLlm::LOCAL:
-            throw ErrorConfig(
-                "No hay gateway LLM disponible en modo LOCAL: configure mode "
-                "REMOTE con la base de una API compatible OpenAI.");
+        case ModoLlm::LOCAL: {
+            if (runtime == nullptr) {
+                throw ErrorConfig(
+                    "El modo LOCAL necesita el runtime del LLM local, que no "
+                    "está disponible en este proceso.");
+            }
+            // El servidor local se levanta (o se reutiliza) y su puerto es la
+            // base de la API compatible OpenAI.
+            const int puerto = runtime->asegurarServidor();
+            ConfigLlm local = config;
+            local.baseUrl = "http://127.0.0.1:" + std::to_string(puerto) + "/v1";
+            local.apiKey.clear();
+            if (local.modelName.empty()) {
+                local.modelName = config.hfFile;
+            }
+            return std::make_unique<GatewayOpenAi>(local);
+        }
         default:
             throw ErrorConfig(
                 "El modo de inferencia no corresponde a ningún gateway");

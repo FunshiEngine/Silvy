@@ -31,6 +31,10 @@ enum class ComandoSilvy {
     PASO_AGENTE,   // "agent.step"
     ERRORES_LIST,  // "errores.list"
     ERRORES_GET,   // "errores.get"
+    LLM_STATUS,    // "llm.status"
+    LLM_DOWNLOAD,  // "llm.download"
+    LLM_CANCEL,    // "llm.cancel"
+    LLM_MODE,      // "llm.mode"
 };
 
 // Texto de protocolo de un comando.

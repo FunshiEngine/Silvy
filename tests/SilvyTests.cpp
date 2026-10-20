@@ -34,6 +34,7 @@
 #include "Modelo/DescargaGguf.h"
 #include "Modelo/EstadoLlm.h"
 #include "Modelo/RutasLocales.h"
+#include "Modelo/RuntimeLlm.h"
 #include "Modelo/SupervisorLlama.h"
 #include "Nucleo/CatalogoComandos.h"
 #include "Nucleo/DependenciasNucleo.h"
@@ -42,6 +43,7 @@
 #include "Nucleo/Respuesta.h"
 #include "Nucleo/Solicitud.h"
 #include "ServidorFalso.h"
+#include "Transporte/LectorSolicitudes.h"
 
 #include <nlohmann/json.hpp>
 
@@ -57,6 +59,7 @@
 #include <iostream>
 #include <iterator>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1572,8 +1575,8 @@ void probarSinGateway() {
           "sin gateway NO_CONFIGURADO");
     CHECK(respuesta["error"]["mensaje"]
               .get<std::string>()
-              .find("gateway") != std::string::npos,
-          "el mensaje menciona el gateway");
+              .find("runtime") != std::string::npos,
+          "el mensaje menciona el runtime local");
 }
 
 void probarSolicitudInvalidaEnNucleo() {
@@ -1805,18 +1808,19 @@ bool probarSubproceso(const char* argv0) {
     CHECK(roto.salida.find("SOLICITUD_INVALIDA") != std::string::npos,
           "subproceso: JSON malformado tipado");
 
-    // Sin gateway: responde NO_CONFIGURADO con el prompt empaquetado.
+    // El binario tiene runtime local, pero no hay modelo descargado: responde
+    // MODELO_NO_DISPONIBLE diciendo cómo bajarlo.
     const fs::path pasoJson = carpeta.ruta() / "paso.json";
     escribirArchivo(
         pasoJson,
         R"({"command":"agent.step","messages":[{"role":"user","content":"hola"}]})");
     const SalidaProceso paso =
         ejecutarProceso(base + "--request-file " + citar(pasoJson));
-    CHECK(paso.codigo == 1, "subproceso: sin gateway sale 1");
-    CHECK(paso.salida.find("NO_CONFIGURADO") != std::string::npos,
-          "subproceso: sin gateway NO_CONFIGURADO");
-    CHECK(paso.salida.find("gateway") != std::string::npos,
-          "subproceso: usa el prompt empaquetado junto al binario");
+    CHECK(paso.codigo == 1, "subproceso: sin modelo sale 1");
+    CHECK(paso.salida.find("MODELO_NO_DISPONIBLE") != std::string::npos,
+          "subproceso: sin modelo MODELO_NO_DISPONIBLE");
+    CHECK(paso.salida.find("llm.download") != std::string::npos,
+          "subproceso: el mensaje explica cómo bajar el modelo");
 
     // Uso inválido de argv: solicitud inválida con exit 2.
     const SalidaProceso ambos = ejecutarProceso(
@@ -2137,6 +2141,214 @@ void probarDescargaGguf() {
     }
 }
 
+void probarLlmLocal() {
+    CarpetaPrueba carpeta("llm-local");
+    const fs::path casa = carpeta.ruta() / "home";
+    fs::create_directories(casa);
+
+    std::string contenido;
+    for (int i = 0; i < 500; ++i) {
+        contenido += "abcdefghij";
+    }
+
+    silvy::pruebas::ServidorFalso servidor;
+    servidor.servirArchivo("/repo/resolve/main/modelo.gguf",
+                           {contenido, true, 0});
+    servidor.arrancar();
+
+    silvy::ConfigLlm config;
+    config.hfBaseUrl =
+        "http://127.0.0.1:" + std::to_string(servidor.puerto());
+    config.hfRepo = "repo";
+    config.hfFile = "modelo.gguf";
+
+    silvy::RuntimeLlm runtime(casa, config);
+    silvy::RegistroErrores registro(configuracionDe(casa));
+    silvy::DependenciasNucleo dependencias(nullptr, registro, casa,
+                                           carpeta.ruta() / "bin", config,
+                                           &runtime);
+
+    // llm.status: todavía no hay modelo.
+    auto resultado =
+        silvy::ejecutarSolicitudJson({{"command", "llm.status"}}, dependencias);
+    CHECK(resultado.codigoSalida == silvy::codigosSalida::kExito,
+          "llm.status sale bien");
+    CHECK(resultado.respuesta.resultado["state"] == "SIN_MODELO",
+          "sin modelo al principio");
+    CHECK(resultado.respuesta.resultado["mode"] == "LOCAL",
+          "el modo por defecto es LOCAL");
+    CHECK(resultado.respuesta.resultado["model"] == "modelo.gguf",
+          "el estado trae el nombre del modelo");
+    CHECK(resultado.respuesta.resultado["lastError"].is_null(),
+          "todavía no hay error");
+
+    // llm.download: la descarga corre en segundo plano.
+    resultado =
+        silvy::ejecutarSolicitudJson({{"command", "llm.download"}}, dependencias);
+    CHECK(resultado.codigoSalida == silvy::codigosSalida::kExito,
+          "llm.download sale bien");
+    CHECK(resultado.respuesta.resultado["downloading"],
+          "la descarga arranca en segundo plano");
+
+    const auto limite =
+        std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (runtime.descargaEnCurso() &&
+           std::chrono::steady_clock::now() < limite) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK(!runtime.descargaEnCurso(), "la descarga termina");
+
+    const fs::path modelo = silvy::rutas::modelo(casa, "modelo.gguf");
+    CHECK(fs::exists(modelo), "el modelo queda descargado");
+    CHECK(leerArchivo(modelo) == contenido,
+          "el contenido descargado es el correcto");
+    CHECK(!fs::exists(silvy::rutas::modeloParcial(casa, "modelo.gguf")),
+          "no queda el parcial");
+    CHECK(!fs::exists(silvy::rutas::lockDescarga(casa, "modelo.gguf")),
+          "no queda el lock");
+
+    resultado =
+        silvy::ejecutarSolicitudJson({{"command", "llm.status"}}, dependencias);
+    CHECK(resultado.respuesta.resultado["state"] == "LISTO",
+          "con el modelo en disco el estado es LISTO");
+    CHECK(resultado.respuesta.resultado["downloadedBytes"] == contenido.size(),
+          "el estado informa los bytes descargados");
+    CHECK(resultado.respuesta.resultado["serverAlive"] == false,
+          "el servidor local todavía no está en pie");
+
+    // llm.mode REMOTE: cambia el modo y lo deja escrito en la casa.
+    resultado = silvy::ejecutarSolicitudJson(
+        {{"command", "llm.mode"},
+         {"args",
+          {{"mode", "REMOTE"},
+           {"baseUrl", "http://127.0.0.1:9999/v1"},
+           {"modelName", "phi-4"}}}},
+        dependencias);
+    CHECK(resultado.codigoSalida == silvy::codigosSalida::kExito,
+          "llm.mode sale bien");
+    CHECK(resultado.respuesta.resultado["mode"] == "REMOTE",
+          "el modo cambia a REMOTE");
+    CHECK(dependencias.configLlm.modo == silvy::ModoLlm::REMOTE,
+          "la configuración del núcleo cambia");
+    const silvy::ConfigLlm guardada = silvy::cargarConfigLlm(casa);
+    CHECK(guardada.modo == silvy::ModoLlm::REMOTE,
+          "el modo queda escrito en la casa");
+    CHECK(guardada.baseUrl == "http://127.0.0.1:9999/v1",
+          "la base del modo remoto queda escrita");
+
+    // Volver a LOCAL con el repositorio y el archivo.
+    resultado = silvy::ejecutarSolicitudJson(
+        {{"command", "llm.mode"},
+         {"args", {{"mode", "LOCAL"}, {"hfRepo", "repo"}}}},
+        dependencias);
+    CHECK(resultado.codigoSalida == silvy::codigosSalida::kExito,
+          "llm.mode vuelve a LOCAL");
+    CHECK(resultado.respuesta.resultado["mode"] == "LOCAL",
+          "el modo vuelve a LOCAL");
+
+    // Un modo inválido es una solicitud inválida.
+    resultado = silvy::ejecutarSolicitudJson(
+        {{"command", "llm.mode"}, {"args", {{"mode", "NUBE"}}}},
+        dependencias);
+    CHECK(resultado.codigoSalida == silvy::codigosSalida::kSolicitudInvalida,
+          "un modo desconocido sale 2");
+    CHECK(resultado.respuesta.error["codigo"] == "SOLICITUD_INVALIDA",
+          "el error del modo desconocido es tipado");
+
+    // llm.mode sin argumentos.
+    resultado =
+        silvy::ejecutarSolicitudJson({{"command", "llm.mode"}}, dependencias);
+    CHECK(resultado.codigoSalida == silvy::codigosSalida::kSolicitudInvalida,
+          "llm.mode sin argumentos sale 2");
+
+    // llm.cancel sin descarga en curso no rompe nada.
+    resultado =
+        silvy::ejecutarSolicitudJson({{"command", "llm.cancel"}}, dependencias);
+    CHECK(resultado.codigoSalida == silvy::codigosSalida::kExito,
+          "llm.cancel sale bien");
+
+    // Sin runtime, los comandos del LLM local no pueden funcionar.
+    silvy::DependenciasNucleo sinRuntime(nullptr, registro, casa,
+                                          carpeta.ruta() / "bin", config);
+    resultado =
+        silvy::ejecutarSolicitudJson({{"command", "llm.status"}}, sinRuntime);
+    CHECK(resultado.codigoSalida == silvy::codigosSalida::kFalloGeneral,
+          "sin runtime el comando del LLM local falla");
+    CHECK(resultado.respuesta.error["codigo"] == "NO_CONFIGURADO",
+          "sin runtime el error es NO_CONFIGURADO");
+}
+
+void probarLectorSolicitudes() {
+    // JSON Lines: una solicitud por línea.
+    {
+        std::istringstream entrada(
+            "{\"command\":\"llm.status\"}\n"
+            "{\"command\":\"llm.download\"}\n");
+        silvy::LectorSolicitudes lector(entrada);
+        const auto primera = lector.siguiente();
+        const auto segunda = lector.siguiente();
+        const auto tercera = lector.siguiente();
+        CHECK(primera.has_value(), "la primera solicitud se lee");
+        CHECK(segunda.has_value(), "la segunda solicitud se lee");
+        CHECK(!tercera.has_value(), "no hay más solicitudes");
+        if (primera && segunda) {
+            CHECK(nlohmann::json::parse(*primera)["command"] == "llm.status",
+                  "la primera es la que toca");
+            CHECK(nlohmann::json::parse(*segunda)["command"] == "llm.download",
+                  "la segunda es la que toca");
+        }
+    }
+
+    // JSON repartido en varias líneas.
+    {
+        std::istringstream entrada("{\n  \"command\": \"llm.status\",\n"
+                                   "  \"arguments\": {\"a\": 1}\n}\n");
+        silvy::LectorSolicitudes lector(entrada);
+        const auto solicitud = lector.siguiente();
+        CHECK(solicitud.has_value(), "el JSON multilínea se lee");
+        if (solicitud) {
+            const auto json = nlohmann::json::parse(*solicitud);
+            CHECK(json["command"] == "llm.status",
+                  "el comando del JSON multilínea");
+            CHECK(json["arguments"]["a"] == 1,
+                  "los argumentos del JSON multilínea");
+        }
+    }
+
+    // Dos objetos en la misma línea: se separan.
+    {
+        std::istringstream entrada("{\"command\":\"a\"}{\"command\":\"b\"}");
+        silvy::LectorSolicitudes lector(entrada);
+        const auto primera = lector.siguiente();
+        const auto segunda = lector.siguiente();
+        CHECK(primera.has_value() && segunda.has_value(),
+              "se leen dos objetos juntos");
+        if (primera && segunda) {
+            CHECK(nlohmann::json::parse(*primera)["command"] == "a",
+                  "el primer objeto");
+            CHECK(nlohmann::json::parse(*segunda)["command"] == "b",
+                  "el segundo objeto");
+        }
+    }
+
+    // Un texto que no es JSON: SOLICITUD_INVALIDA.
+    {
+        std::istringstream entrada("esto no es json\n");
+        silvy::LectorSolicitudes lector(entrada);
+        CHECK(lanzaConCodigo([&] { lector.siguiente(); },
+                              silvy::CodigoError::SOLICITUD_INVALIDA),
+              "un JSON inválido es SOLICITUD_INVALIDA");
+    }
+
+    // Un flujo vacío: no hay solicitudes.
+    {
+        std::istringstream entrada("");
+        silvy::LectorSolicitudes lector(entrada);
+        CHECK(!lector.siguiente().has_value(),
+              "un flujo vacío no da solicitudes");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2190,6 +2402,10 @@ int main(int argc, char** argv) {
     probarAyudasLocales();
     std::cout << "== descarga del gguf ==\n";
     probarDescargaGguf();
+    std::cout << "== comandos del llm local ==\n";
+    probarLlmLocal();
+    std::cout << "== lector de solicitudes ==\n";
+    probarLectorSolicitudes();
     std::cout << "== subproceso ==\n";
     const bool subproceso = probarSubproceso(argc > 0 ? argv[0] : "");
 

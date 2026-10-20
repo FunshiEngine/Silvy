@@ -19,6 +19,7 @@
 #include "Nucleo/NucleoSilvy.h"
 
 #include "Comandos/ErroresComandos.h"
+#include "Comandos/LlmComandos.h"
 #include "Comandos/PasoAgente.h"
 #include "Config/ConfigLlm.h"
 #include "Nucleo/CatalogoComandos.h"
@@ -193,6 +194,18 @@ ResultadoComando ejecutarSolicitud(const Solicitud& solicitud,
                 break;
             case ComandoSilvy::ERRORES_GET:
                 resultado = ejecutarErroresGet(solicitud, dependencias);
+                break;
+            case ComandoSilvy::LLM_STATUS:
+                resultado = ejecutarLlmStatus(solicitud, dependencias);
+                break;
+            case ComandoSilvy::LLM_DOWNLOAD:
+                resultado = ejecutarLlmDownload(solicitud, dependencias);
+                break;
+            case ComandoSilvy::LLM_CANCEL:
+                resultado = ejecutarLlmCancel(solicitud, dependencias);
+                break;
+            case ComandoSilvy::LLM_MODE:
+                resultado = ejecutarLlmMode(solicitud, dependencias);
                 break;
         }
         resultado.respuesta.id = solicitud.id;

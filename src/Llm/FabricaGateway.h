@@ -26,11 +26,17 @@
 
 namespace silvy {
 
+class RuntimeLlm;
+
 // Construye el gateway que corresponde a la configuración efectiva: valida
 // la configuración (fail-fast, con todos los problemas juntos) y elige la
 // implementación según el modo. Lanza ErrorConfig si la configuración no
 // permite hablar con un LLM.
-std::unique_ptr<LlmGateway> crearGateway(const ConfigLlm& config);
+//
+// En modo LOCAL el runtime local es el que levanta el servidor y devuelve el
+// puerto; sin runtime no hay gateway local posible y se lanza ErrorConfig.
+std::unique_ptr<LlmGateway> crearGateway(const ConfigLlm& config,
+                                          RuntimeLlm* runtime = nullptr);
 
 }  // namespace silvy
 

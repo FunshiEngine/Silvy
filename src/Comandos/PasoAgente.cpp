@@ -43,7 +43,7 @@ ResultadoComando ejecutarPasoAgente(const Solicitud& solicitud,
     std::unique_ptr<LlmGateway> gatewayPropio;
     LlmGateway* gateway = dependencias.gateway;
     if (gateway == nullptr) {
-        gatewayPropio = crearGateway(config);
+        gatewayPropio = crearGateway(config, dependencias.runtime);
         gateway = gatewayPropio.get();
     }
 
